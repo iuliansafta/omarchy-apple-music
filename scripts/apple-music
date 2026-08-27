@@ -1,0 +1,97 @@
+#!/bin/bash
+
+set -euo pipefail
+
+APP_ID="omarchy-apple-music"
+APP_NAME="Apple Music"
+APP_URL="https://music.apple.com"
+APP_CLASS="chrome-music.apple.com__-Default"
+PROFILE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_ID/chromium-profile"
+DESKTOP_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$APP_ID.desktop"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PLUGIN_DIR=$(dirname "$SCRIPT_DIR")
+EXTENSION_DIR="$PLUGIN_DIR/extension"
+ICON_SOURCE="$PLUGIN_DIR/assets/apple-music.svg"
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+ICON_FILE="$ICON_DIR/$APP_ID.svg"
+
+window() {
+  hyprctl clients -j 2>/dev/null | jq -c --arg class "$APP_CLASS" \
+    '.[] | select(.class == $class or .initialClass == $class)' | head -n1
+}
+
+pid() {
+  local client
+  client=$(window || true)
+  [[ -n $client ]] && jq -r '.pid // empty' <<<"$client"
+}
+
+focus() {
+  local client address
+  client=$(window || true)
+  [[ -n $client ]] || return 1
+  address=$(jq -r '.address' <<<"$client")
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$address" >/dev/null
+}
+
+browser() {
+  if command -v chromium >/dev/null 2>&1; then
+    command -v chromium
+  elif command -v chromium-browser >/dev/null 2>&1; then
+    command -v chromium-browser
+  else
+    echo "Apple Music requires Chromium." >&2
+    return 1
+  fi
+}
+
+open_app() {
+  if focus; then
+    return
+  fi
+
+  mkdir -p "$PROFILE_DIR"
+  exec setsid uwsm-app -- "$(browser)" \
+    --ozone-platform=wayland \
+    --user-data-dir="$PROFILE_DIR" \
+    --load-extension="$EXTENSION_DIR" \
+    --app="$APP_URL"
+}
+
+install_launcher() {
+  mkdir -p "$(dirname "$DESKTOP_FILE")" "$ICON_DIR"
+  cp "$ICON_SOURCE" "$ICON_FILE"
+
+  local escaped_script=${SCRIPT_DIR//\\/\\\\}
+  escaped_script=${escaped_script//\"/\\\"}
+  cat >"$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$APP_NAME
+Comment=Apple Music web player
+Exec="$escaped_script/apple-music" open
+Icon=$APP_ID
+Terminal=false
+StartupNotify=true
+StartupWMClass=$APP_CLASS
+Categories=AudioVideo;Audio;Player;
+EOF
+  chmod +x "$DESKTOP_FILE"
+  update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
+  gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" >/dev/null 2>&1 || true
+  printf '%s\n' "$DESKTOP_FILE"
+}
+
+case "${1:-open}" in
+  open) open_app ;;
+  focus) focus ;;
+  pid) pid ;;
+  install) install_launcher ;;
+  is-installed) [[ -f $DESKTOP_FILE ]] ;;
+  *)
+    echo "Usage: $0 {open|focus|pid|install|is-installed}" >&2
+    exit 2
+    ;;
+esac

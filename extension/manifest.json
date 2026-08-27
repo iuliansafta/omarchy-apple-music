@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Omarchy Apple Music Duration Bridge",
+  "version": "0.1.0",
+  "description": "Publishes Apple Music Web track duration to Chromium Media Session.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://music.apple.com/*"
+      ],
+      "js": [
+        "duration-bridge.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}

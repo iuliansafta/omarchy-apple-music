@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "iuliansafta.apple-music",
+  "name": "Apple Music",
+  "version": "0.1.0",
+  "author": "Iulian Safta",
+  "description": "Apple Music web player controls and now-playing information for the Omarchy bar.",
+  "homepage": "https://github.com/iuliansafta/omarchy-apple-music",
+  "license": "MIT",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "AppleMusicService.qml",
+    "barWidget": "AppleMusicWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Apple Music",
+    "description": "Now playing and playback controls for Apple Music Web.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "showArtist": true,
+      "maxLabelWidth": 220,
+      "hideWhenNotRunning": true
+    },
+    "schema": [
+      {
+        "key": "showArtist",
+        "type": "boolean",
+        "label": "Show artist",
+        "defaultValue": true
+      },
+      {
+        "key": "maxLabelWidth",
+        "type": "integer",
+        "label": "Maximum label width",
+        "min": 100,
+        "max": 500,
+        "step": 20,
+        "defaultValue": 220
+      },
+      {
+        "key": "hideWhenNotRunning",
+        "type": "boolean",
+        "label": "Hide when Apple Music is not running",
+        "defaultValue": true
+      }
+    ]
+  }
+}
