@@ -37,22 +37,38 @@ Add the widget to the bar if your Omarchy version does not place it automaticall
 omarchy plugin enable iuliansafta.apple-music center
 ```
 
-Click the Apple Music widget to launch the dedicated web app, then sign in. This profile is intentionally separate from the normal Chromium profile so Apple Music has its own MPRIS player.
+### First launch and sign-in
 
-By default the widget hides itself when Apple Music is not running, so on a fresh install it is not visible in the bar until the app is launched once. Start it with either of:
+The widget is hidden on a fresh install, so start the web app once. Any of these work:
 
 ```bash
+# Click the Apple Music widget in the bar (once it is visible)
 ~/.config/omarchy/plugins/iuliansafta.apple-music/scripts/apple-music open
 omarchy-shell iuliansafta.apple-music open
 ```
 
 After the window opens the widget appears automatically (within a couple of seconds). To keep the widget reserved in the bar even when Apple Music is closed, set `hideWhenNotRunning` to `false` in the widget's shell.json entry or via Omarchy's settings UI.
 
-To also add Apple Music to the application launcher:
+Sign in inside the opened window with your Apple ID (two-factor authentication works as usual — the confirmation code prompt appears in the same window). Credentials are stored in the plugin's isolated Chromium profile at `~/.local/share/omarchy-apple-music/chromium-profile`, so you stay signed in across restarts and the login never touches your normal browser profile. Without an active Apple Music subscription you can browse the library, but playback is limited to previews.
+
+### Add Apple Music to the app launcher
+
+To also start Apple Music from the application launcher (SUPER + SPACE), either use the plugin's own installer — recommended, because it registers the dedicated app with its bundled extension:
 
 ```bash
 ~/.config/omarchy/plugins/iuliansafta.apple-music/scripts/apple-music install
 ```
+
+Or create a web app the generic Omarchy way, pointing its `custom-exec` at the plugin's launcher so the extension and the bridge daemon still load:
+
+omarchy webapp install "Apple Music" https://music.apple.com \
+  "$HOME/.config/omarchy/plugins/iuliansafta.apple-music/assets/apple-music.svg" \
+  "$HOME/.config/omarchy/plugins/iuliansafta.apple-music/scripts/apple-music open"
+```
+
+Remove it again with `omarchy webapp remove "Apple Music"`.
+
+A plain `omarchy webapp install "Apple Music" https://music.apple.com apple-music` (without the custom exec) opens music.apple.com in a generic app window on your normal Chromium profile. The bar widget's playback controls may work, but the bundled extension will not load — so the HLS duration fix, ratings, and queue features are unavailable.
 
 ## Controls
 
