@@ -2,6 +2,8 @@
 
 Apple Music Web as a first-class [Omarchy 4.0](https://omarchy.org/) bar widget.
 
+![Apple Music bar widget with the now-playing popup open](assets/omarchy-apple-music.png)
+
 The plugin keeps authentication, DRM, library access, and playback in the official Apple Music web player. It uses Quickshell's native MPRIS integration for now-playing information and controls.
 
 ## Features
