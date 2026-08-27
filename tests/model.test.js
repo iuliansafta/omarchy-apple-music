@@ -21,5 +21,33 @@ assert.equal(model.progress(30, Number.MAX_SAFE_INTEGER), 0)
 assert.equal(model.boundedPosition(130, 120), 120)
 assert.equal(model.formatTime(0), "0:00")
 assert.equal(model.formatTime(151), "2:31")
+// Bridge state is only trusted when it names the same track MPRIS reports.
+assert.equal(model.bridgeIsActive(null, "Nowhere Fast"), false)
+assert.equal(model.bridgeIsActive({ ok: false, trackTitle: "Nowhere Fast" }, "Nowhere Fast"), false)
+assert.equal(model.bridgeIsActive({ ok: true, trackTitle: "Nowhere Fast" }, "Nowhere Fast"), true)
+assert.equal(model.bridgeIsActive({ ok: true, trackTitle: "Nowhere Fast" }, "With You"), false)
+assert.equal(model.bridgeIsActive({ ok: true, trackTitle: "" }, ""), false)
+
+assert.equal(model.upNextFromState(null).length, 0)
+assert.equal(model.upNextFromState({ ok: true }).length, 0)
+const historyLines = [
+  JSON.stringify({ ts: 1, title: "A", artist: "X" }),
+  JSON.stringify({ ts: 2, title: "B", artist: "Y", album: "Album", art: "b.jpg" }),
+  "not json",
+  JSON.stringify({ ts: 3, title: "C", artist: "Z" }),
+  ""
+].join("\n")
+const history = model.parseHistoryLines(historyLines, 2)
+assert.equal(history.length, 2)
+assert.equal(history[0].title, "C")
+assert.equal(history[1].title, "B")
+assert.equal(history[1].album, "Album")
+assert.equal(model.parseHistoryLines("", 10).length, 0)
+
+// The append script keeps the file bounded without leaving a torn line.
+const script = model.historyAppendBashScript()
+assert.ok(script.includes("printf"))
+assert.ok(script.includes("tail -n 200"))
+assert.ok(script.includes("mkdir -p"))
 
 console.log("AppleMusicModel tests passed")

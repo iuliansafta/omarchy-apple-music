@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Omarchy Apple Music Duration Bridge",
-  "version": "0.1.0",
-  "description": "Publishes Apple Music Web track duration to Chromium Media Session.",
+  "name": "Omarchy Apple Music Bridge",
+  "version": "0.2.0",
+  "description": "Bridges Apple Music Web state (duration, rating, queue) to the Omarchy bar and relays bar commands into the page.",
   "content_scripts": [
     {
       "matches": [

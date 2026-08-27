@@ -11,6 +11,26 @@ Item {
   property int browserPid: 0
   property int positionRevision: 0
 
+  // Bridge state relayed by scripts/bridge-daemon: rating + queue context for
+  // the current track. Only trusted while it names the track MPRIS reports.
+  property var bridgeState: null
+  property var recentTracks: []
+  property string lastHistoryKey: ""
+  property int commandSequence: 0
+
+  readonly property string dataRoot:
+    (Quickshell.env("XDG_DATA_HOME") || Quickshell.env("HOME") + "/.local/share") + "/omarchy-apple-music"
+  readonly property string profileDir: dataRoot + "/chromium-profile"
+  readonly property string bridgeCommandsDir: dataRoot + "/bridge-commands"
+  readonly property string historyPath: dataRoot + "/history.jsonl"
+  readonly property string bridgeDaemonPath:
+    Qt.resolvedUrl("scripts/bridge-daemon").toString().replace(/^file:\/\//, "")
+
+  readonly property bool bridgeActive: available && Model.bridgeIsActive(bridgeState, title)
+  readonly property string rating:
+    bridgeActive && bridgeState.rating ? String(bridgeState.rating) : "unknown"
+  readonly property var upNext: bridgeActive ? Model.upNextFromState(bridgeState) : []
+
   // True when the dedicated Chromium Apple Music window is running. The
   // widget binds its visibility to this so a closed player does not reserve
   // bar space.
@@ -26,7 +46,13 @@ Item {
   readonly property string title: available ? (activePlayer.trackTitle || "") : ""
   readonly property string artist: available ? (activePlayer.trackArtist || "") : ""
   readonly property string album: available ? (activePlayer.trackAlbum || "") : ""
-  readonly property string artUrl: available ? (activePlayer.trackArtUrl || "") : ""
+  // Chromium republishes MPRIS metadata several times per track switch, each
+  // time pointing mpris:artUrl at a new /tmp file and deleting the previous
+  // one within ~600ms. Binding an Image directly to that churn loads files
+  // that are already gone and flashes the artwork fallback. Adopt the URL
+  // only once it stops changing, so only the surviving final file is used.
+  readonly property string rawArtUrl: available ? (activePlayer.trackArtUrl || "") : ""
+  property string artUrl: ""
   readonly property real position: {
     positionRevision
     return available && activePlayer.positionSupported
@@ -50,6 +76,48 @@ Item {
 
   function installLauncher() {
     Quickshell.execDetached([launcherPath, "install"])
+  }
+
+  function sendBridgeCommand(command) {
+    if (!bridgeActive) return
+    commandSequence += 1
+    bridgeCommandProc.command = [
+      "bash", "-c", "printf '%s' \"$1\" > \"$2\"", "sh",
+      JSON.stringify(command), bridgeCommandsDir + "/cmd-" + commandSequence + ".json"
+    ]
+    bridgeCommandProc.running = true
+  }
+
+  function rate(value) {
+    sendBridgeCommand({ action: "rate", value: Number(value) })
+  }
+
+  function toggleLike() {
+    rate(rating === "like" ? 0 : 1)
+  }
+
+  function toggleDislike() {
+    rate(rating === "dislike" ? 0 : -1)
+  }
+
+  function jumpToQueueIndex(index) {
+    sendBridgeCommand({ action: "jump", index: Number(index) || 0 })
+  }
+
+  function appendHistory() {
+    if (!hasMedia) return
+    var key = Model.historyLogKey(title, artist)
+    if (key === lastHistoryKey) return
+    lastHistoryKey = key
+    var entry = {
+      ts: Date.now(), title: title, artist: artist, album: album, art: artUrl
+    }
+    recentTracks = [entry].concat(recentTracks).slice(0, 30)
+    historyAppendProc.command = [
+      "bash", "-c", Model.historyAppendBashScript(), "sh",
+      JSON.stringify(entry), historyPath
+    ]
+    historyAppendProc.running = true
   }
 
   function togglePlayback() {
@@ -77,6 +145,26 @@ Item {
     positionRevision += 1
   }
 
+  // MPRIS title/artist can land a tick apart; the debounce lets both settle
+  // before the entry is written, and lastHistoryKey collapses the result.
+  onTitleChanged: historyLogTimer.restart()
+
+  onRawArtUrlChanged: artSettleTimer.restart()
+
+  Timer {
+    id: artSettleTimer
+    interval: 600
+    repeat: false
+    onTriggered: root.artUrl = root.rawArtUrl
+  }
+
+  Timer {
+    id: delayedRefresh
+    interval: 1500
+    repeat: false
+    onTriggered: root.refreshBrowserPid()
+  }
+
   Process {
     id: pidProcess
     command: [root.launcherPath, "pid"]
@@ -102,11 +190,39 @@ Item {
   }
 
   Timer {
-    id: delayedRefresh
-    interval: 1500
+    id: historyLogTimer
+    interval: 1200
     repeat: false
-    onTriggered: root.refreshBrowserPid()
+    onTriggered: root.appendHistory()
   }
+
+  Process {
+    id: bridgeDaemon
+    command: ["python3", root.bridgeDaemonPath, root.profileDir, root.bridgeCommandsDir]
+    running: true
+    onExited: function(exitCode, exitStatus) {
+      console.warn("iuliansafta.apple-music bridge-daemon exited:", exitCode, exitStatus)
+    }
+    onStarted: console.log("iuliansafta.apple-music bridge-daemon started")
+    stdout: SplitParser {
+      onRead: function(line) {
+        try {
+          root.bridgeState = JSON.parse(String(line || ""))
+        } catch (_) {
+          root.bridgeState = null
+        }
+      }
+    }
+    stderr: SplitParser {
+      onRead: function(line) {
+        console.warn("iuliansafta.apple-music bridge-daemon:", String(line || "").trim())
+      }
+    }
+  }
+
+  Process { id: bridgeCommandProc }
+
+  Process { id: historyAppendProc }
 
   IpcHandler {
     target: "iuliansafta.apple-music"
@@ -121,7 +237,11 @@ Item {
         album: root.album,
         position: root.position,
         length: root.hasValidLength ? root.trackLength : null,
-        canSeek: root.canSeek
+        canSeek: root.canSeek,
+        rating: root.rating,
+        bridgeActive: root.bridgeActive,
+        upNext: root.upNext,
+        recentTracks: root.recentTracks
       })
     }
 
@@ -130,5 +250,9 @@ Item {
     function previous(): void { root.previous() }
     function next(): void { root.next() }
     function seek(fraction: real): void { root.seekFraction(fraction) }
+    function setRating(value: int): void { root.rate(value) }
+    function like(): void { root.toggleLike() }
+    function dislike(): void { root.toggleDislike() }
+    function jumpTo(index: int): void { root.jumpToQueueIndex(index) }
   }
 }

@@ -72,10 +72,262 @@ function bridgeAppleMusicDuration() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Now Playing+: queue/rating state for the bar and commands from the bar.
+// Transport is the bridge daemon (scripts/bridge-daemon), which evaluates
+// collect()/command() over Chromium's DevTools protocol and relays JSON.
+// ---------------------------------------------------------------------------
+
+function playParamsOf(item) {
+  return (item && item.attributes && item.attributes.playParams) || null
+}
+
+function playableId(item) {
+  return String((playParamsOf(item) && playParamsOf(item).id) || "")
+}
+
+// Ratings live at /v1/me/ratings/{songs|library-songs}/{id}; the kind must
+// match where the id points (library ids start with "i.").
+function ratingKind(item) {
+  var kind = String((playParamsOf(item) && playParamsOf(item).kind) || "songs")
+  return kind === "library-songs" ? "library-songs" : "songs"
+}
+
+function ratingStateForValue(value) {
+  var number = Number(value)
+  if (number === 1) return "like"
+  if (number === -1) return "dislike"
+  if (number === 0) return "none"
+  return "unknown"
+}
+
+function normalizeQueueEntry(item, index) {
+  var attributes = item && item.attributes
+  if (!attributes || !attributes.name) return null
+  var durationMillis = Number(attributes.durationInMillis)
+  return {
+    index: index,
+    id: playableId(item),
+    title: String(attributes.name || ""),
+    artist: String(attributes.artistName || ""),
+    durationSeconds: durationMillis > 0 ? durationMillis / 1000 : 0
+  }
+}
+
+// {items, position} for the live queue. Prefers the public MusicKit.Queue
+// (items + position); falls back to the private playback controller queue the
+// duration bridge already relies on, locating the current item by identity.
+function queueContext(music) {
+  var publicQueue = music && music.player && music.player.queue
+  var publicPosition = publicQueue ? Number(publicQueue.position) : NaN
+  if (publicQueue && Array.isArray(publicQueue.items) &&
+      publicQueue.position !== null && Number.isFinite(publicPosition)) {
+    return { items: publicQueue.items, position: publicPosition }
+  }
+
+  var privateQueue = music && music._playbackController && music._playbackController._queue
+  if (!privateQueue) return null
+
+  var wrapped = Array.isArray(privateQueue._queueItems) ? privateQueue._queueItems : []
+  var items = []
+  for (var i = 0; i < wrapped.length; i++) items.push(wrapped[i] && (wrapped[i].item || wrapped[i]))
+
+  var position = -1
+  for (var j = 0; j < items.length; j++) {
+    if (items[j] && items[j] === privateQueue.currentItem) { position = j; break }
+  }
+  return { items: items, position: position }
+}
+
+// First `max` entries after the currently playing item, each carrying its
+// absolute queue index so jump-to-track survives the trim.
+function upNextEntries(items, position, max) {
+  var entries = []
+  var start = Math.max(0, Number(position) || 0) + 1
+  var limit = Number(max) || 20
+  for (var i = start; i < items.length && entries.length < limit; i++) {
+    var entry = normalizeQueueEntry(items[i], i)
+    if (entry) entries.push(entry)
+  }
+  return entries
+}
+
+var ratingCache = { id: "", state: "unknown" }
+
+function ratingsUrl(item) {
+  return "https://api.music.apple.com/v1/me/ratings/" +
+    ratingKind(item) + "/" + encodeURIComponent(playableId(item))
+}
+
+function authHeaders(music) {
+  return {
+    "Authorization": "Bearer " + music.developerToken,
+    "Music-User-Token": music.musicUserToken,
+    "Content-Type": "application/json"
+  }
+}
+
+// Rating lookups only run on track change: one GET per id, cached until the
+// id changes. collect() reports the cached state and never awaits the fetch.
+function refreshRatingCache(music, item) {
+  var id = playableId(item)
+  if (!id) { ratingCache = { id: "", state: "unknown" }; return }
+  if (ratingCache.id === id) return
+  ratingCache = { id: id, state: "unknown" }
+
+  var cacheId = id
+  var controller = new AbortController()
+  var timer = setTimeout(function() { controller.abort() }, 3000)
+  fetch(ratingsUrl(item), { headers: authHeaders(music), signal: controller.signal })
+    .then(function(response) {
+      // An unrated song has no rating resource: the API answers 404, which
+      // means "none", not "unknown" (unknown = lookup failed).
+      if (response.status === 404) return { notFound: true }
+      return response.ok ? response.json() : null
+    })
+    .then(function(data) {
+      if (ratingCache.id !== cacheId) return
+      if (data && data.notFound) { ratingCache.state = "none"; return }
+      var value = data && data.data && data.data[0] &&
+        data.data[0].attributes ? data.data[0].attributes.value : 0
+      ratingCache.state = data ? ratingStateForValue(value) : "unknown"
+    })
+    .catch(function() {
+      if (ratingCache.id === cacheId) ratingCache.state = "unknown"
+    })
+    .then(function() { clearTimeout(timer) })
+}
+
+function currentTrackItem(music) {
+  var metadata = navigator.mediaSession && navigator.mediaSession.metadata
+  var context = queueContext(music)
+  if (!context) return null
+
+  var current = context.position >= 0 ? context.items[context.position] : null
+  // currentItem/position can lag a track change; Media Session metadata is
+  // the authority for what is actually audible (same rule as duration).
+  var matched = musicKitItemForMetadata(
+    { currentItem: current, _queueItems: context.items }, metadata)
+  return matched || current
+}
+
+function collectBridgeState() {
+  try {
+    var music = window.MusicKit && window.MusicKit.getInstance
+      ? window.MusicKit.getInstance() : null
+    if (!music) return { ok: false }
+
+    var metadata = navigator.mediaSession && navigator.mediaSession.metadata
+    var context = queueContext(music)
+    var current = currentTrackItem(music)
+    var trackId = current ? playableId(current) : ""
+    if (trackId) refreshRatingCache(music, current)
+
+    // MusicKit's queue position can go stale around jumps (playMediaItem),
+    // so window the up-next list from where the matched current item
+    // actually sits, falling back to the reported position.
+    var position = context && current ? context.items.indexOf(current) : -1
+    if (position < 0 && context) position = context.position
+
+    return {
+      ok: true,
+      trackTitle: metadata ? String(metadata.title || "") : "",
+      trackId: trackId,
+      trackKind: current ? ratingKind(current) : "songs",
+      rating: current && trackId && ratingCache.id === trackId
+        ? ratingCache.state : "unknown",
+      queuePosition: position,
+      queueLength: context ? context.items.length : 0,
+      upNext: context ? upNextEntries(context.items, position, 20) : []
+    }
+  } catch (_) {
+    return { ok: false }
+  }
+}
+
+function setRating(music, item, value) {
+  var id = playableId(item)
+  if (!id) return Promise.resolve({ ok: false, error: "no-track" })
+  var state = ratingStateForValue(value)
+  var cacheId = id
+  var number = Number(value)
+
+  // Clearing a rating is a DELETE: the API rejects PUT value 0, and the
+  // rating resource only exists once a like/dislike was stored.
+  var request
+  if (number === 0) {
+    request = fetch(ratingsUrl(item), { method: "DELETE", headers: authHeaders(music) })
+  } else {
+    request = fetch(ratingsUrl(item), {
+      method: "PUT",
+      headers: authHeaders(music),
+      body: JSON.stringify({ type: "rating", attributes: { value: number } })
+    })
+  }
+
+  return request.then(function(response) {
+    if (!response.ok) return { ok: false, error: "http-" + response.status }
+    if (ratingCache.id === cacheId) ratingCache.state = state
+    return { ok: true, rating: state }
+  }).catch(function() {
+    return { ok: false, error: "network" }
+  })
+}
+
+function handleCommand(payload) {
+  try {
+    var action = payload && payload.action
+    var music = window.MusicKit && window.MusicKit.getInstance
+      ? window.MusicKit.getInstance() : null
+    if (!music) return Promise.resolve({ ok: false, error: "no-musickit" })
+
+    if (action === "rate") {
+      var current = currentTrackItem(music)
+      if (!current) return Promise.resolve({ ok: false, error: "no-track" })
+      return setRating(music, current, payload.value)
+    }
+
+    if (action === "jump") {
+      var index = Number(payload.index)
+      if (!Number.isInteger(index) || index < 0) {
+        return Promise.resolve({ ok: false, error: "bad-index" })
+      }
+      // changeToMediaAtIndex hangs unresolved on the current web player
+      // build, so jump by playing the queue item at the target index via
+      // playMediaItem, which the player itself uses and begins playback.
+      var context = queueContext(music)
+      var target = context && context.items[index]
+      if (!target) return Promise.resolve({ ok: false, error: "bad-index" })
+      if (typeof music.playMediaItem === "function") {
+        return music.playMediaItem(target)
+          .then(function() { return { ok: true } })
+          .catch(function() { return { ok: false, error: "jump-failed" } })
+      }
+      var player = music.player || music
+      if (typeof player.changeToMediaAtIndex !== "function") {
+        return Promise.resolve({ ok: false, error: "no-jump-api" })
+      }
+      return player.changeToMediaAtIndex(index)
+        .then(function() { return { ok: true } })
+        .catch(function() { return { ok: false, error: "jump-failed" } })
+    }
+    return Promise.resolve({ ok: false, error: "unknown-action" })
+  } catch (_) {
+    return Promise.resolve({ ok: false, error: "exception" })
+  }
+}
+
 if (typeof window !== "undefined" && typeof document !== "undefined") {
   setInterval(bridgeAppleMusicDuration, 1000)
   document.addEventListener("visibilitychange", bridgeAppleMusicDuration)
   window.addEventListener("pageshow", bridgeAppleMusicDuration)
+
+  if (!window.__omarchyAppleMusic) {
+    window.__omarchyAppleMusic = {
+      collect: collectBridgeState,
+      command: handleCommand
+    }
+  }
 }
 
 if (typeof module !== "undefined") {
@@ -84,6 +336,14 @@ if (typeof module !== "undefined") {
     bridgedPosition: bridgedPosition,
     itemMatchesMetadata: itemMatchesMetadata,
     musicKitItemForMetadata: musicKitItemForMetadata,
-    needsDurationBridge: needsDurationBridge
+    needsDurationBridge: needsDurationBridge,
+    playableId: playableId,
+    ratingKind: ratingKind,
+    ratingStateForValue: ratingStateForValue,
+    normalizeQueueEntry: normalizeQueueEntry,
+    queueContext: queueContext,
+    upNextEntries: upNextEntries,
+    collectBridgeState: collectBridgeState,
+    handleCommand: handleCommand
   }
 }

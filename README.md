@@ -11,14 +11,16 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 - Launch or focus Apple Music from the bar
 - Track title, artist, album, and artwork
 - Previous, play/pause, and next controls
-- Elapsed time
-- Progress and seeking, including HLS tracks whose duration Chromium normally loses
-- Coexists with Spotify and other MPRIS players
+- Like and dislike for the current song, synced to the Apple Music library
+- Up-next queue with click-to-jump
+- Recently played history
+- Player panel with a blurred artwork backdrop
 
 ## Requirements
 
 - Omarchy 4.0
 - Chromium
+- python3 (standard library only, no packages)
 - An Apple Music subscription
 
 `playerctl` is not required.
@@ -64,6 +66,10 @@ To also add Apple Music to the application launcher:
 Some Apple Music HLS tracks expose `Infinity` as the HTML audio duration even though MusicKit's queue contains the real catalog duration. Chromium converts that infinity to the maximum signed 64-bit MPRIS value.
 
 The plugin bundles a minimal extension, restricted to `https://music.apple.com/*`, that republishes MusicKit's `durationInMillis` through the standard Media Session API. This restores MPRIS progress and seeking. It uses Apple Music's private MusicKit queue object, so a future Apple Music Web update may require an adjustment. Invalid values still fall back safely to elapsed time with `--:--`.
+
+## Ratings and queue
+
+Chromium's Media Session cannot carry ratings or queue contents, so those travel a different path: the bundled extension also exposes a `collect`/`command` hook on the page, and a small daemon (`scripts/bridge-daemon`, spawned by the plugin service) relays it over Chromium's DevTools protocol — which the dedicated browser enables with `--remote-debugging-port=0` on a localhost-only port. Ratings are read and written through Apple Music's own ratings API with the tokens MusicKit already holds in the page. If Apple Music Web changes its internals, rating and queue features degrade to hidden while duration bridging and playback controls keep working.
 
 ## Remove
 

@@ -1,7 +1,9 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import qs.Commons
 import qs.Ui
+import "AppleMusicModel.js" as Model
 
 BarWidget {
   id: root
@@ -15,6 +17,14 @@ BarWidget {
   // so it stops reserving bar space. Bar.qml sizes a slot to 0 when its
   // activeItem.visible is false, which is what this binding drives.
   readonly property bool hideWhenNotRunning: setting("hideWhenNotRunning", true)
+  readonly property bool showQueue: setting("showQueue", true)
+  readonly property bool showRecentlyPlayed: setting("showRecentlyPlayed", true)
+  // Nerd Font nf-md glyphs, resolved from CaskaydiaMono Nerd Font's cmap:
+  // md-heart, md-heart_outline, md-thumb_down, md-thumb_down_outline
+  readonly property string heartIcon: String.fromCodePoint(0xf02d1)
+  readonly property string heartOutlineIcon: String.fromCodePoint(0xf02d5)
+  readonly property string thumbDownIcon: String.fromCodePoint(0xf0511)
+  readonly property string thumbDownOutlineIcon: String.fromCodePoint(0xf0512)
   visible: !hideWhenNotRunning || (music && music.running)
   readonly property string trackLabel: {
     if (!music || !music.hasMedia) return "Music"
@@ -31,6 +41,13 @@ BarWidget {
   function toggle() { popupOpen = !popupOpen }
 
   onVisibleChanged: if (!visible) popupOpen = false
+
+  // Last artwork URL that decoded successfully. Chromium hands MPRIS a new
+  // /tmp artwork file several times per track switch and deletes the old
+  // ones, so binding an Image straight to artUrl flashes placeholders. The
+  // visible images keep painting readyArtUrl until the new URL finishes
+  // loading in the probe below.
+  property string readyArtUrl: ""
 
   // Omarchy's draggable bar wrapper uses this contract both to dispatch
   // clicks and to decide whether the slot should show a pointing cursor.
@@ -105,6 +122,16 @@ BarWidget {
     onExited: if (root.bar) root.bar.hideTooltip(root)
   }
 
+  Image {
+    id: artworkProbe
+    visible: false
+    asynchronous: true
+    cache: false
+    source: root.music ? root.music.artUrl : ""
+    onSourceChanged: if (source === "") root.readyArtUrl = ""
+    onStatusChanged: if (status === Image.Ready) root.readyArtUrl = source
+  }
+
   PopupCard {
     id: popup
     anchorItem: root
@@ -113,6 +140,40 @@ BarWidget {
     open: root.popupOpen
     contentWidth: popup.fittedContentWidth(Style.space(340))
     contentHeight: popup.fittedContentHeight(content.implicitHeight)
+
+    // Blurred artwork glow behind the card contents, macOS now-playing
+    // style. Sits as the first child of PopupCard's content holder so every
+    // layout child paints on top of it.
+    Rectangle {
+      anchors.fill: parent
+      anchors.margins: -popup.padding
+      radius: Style.cornerRadius
+      clip: true
+      color: Color.popups.background
+      visible: root.readyArtUrl !== ""
+
+      Image {
+        anchors.fill: parent
+        anchors.margins: Style.space(24)
+        source: root.readyArtUrl
+        fillMode: Image.PreserveAspectCrop
+        // Loads before the next paint, so the glow never shows a gap while
+        // the freshly adopted artwork decodes.
+        asynchronous: false
+        layer.enabled: true
+        layer.effect: MultiEffect {
+          blurEnabled: true
+          blur: 1.0
+          blurMax: 48
+          saturation: 0.5
+        }
+      }
+
+      Rectangle {
+        anchors.fill: parent
+        color: Util.alpha(Color.popups.background, 0.5)
+      }
+    }
 
     Column {
       id: content
@@ -134,7 +195,7 @@ BarWidget {
             id: artwork
             anchors.fill: parent
             anchors.margins: Style.space(2)
-            source: root.music ? root.music.artUrl : ""
+            source: root.readyArtUrl
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             cache: false
@@ -284,7 +345,138 @@ BarWidget {
         }
       }
 
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(8)
+
+        Button {
+          width: Style.space(44)
+          height: Style.space(40)
+          iconText: root.music && root.music.rating === "like"
+            ? root.heartIcon : root.heartOutlineIcon
+          foreground: root.music && root.music.rating === "like"
+            ? Color.accent : root.bar.foreground
+          enabled: !!root.music && root.music.bridgeActive
+          opacity: enabled ? 1 : 0.4
+          onClicked: root.music.toggleLike()
+        }
+
+        Button {
+          width: Style.space(44)
+          height: Style.space(40)
+          iconText: root.music && root.music.rating === "dislike"
+            ? root.thumbDownIcon : root.thumbDownOutlineIcon
+          foreground: root.music && root.music.rating === "dislike"
+            ? Color.accent : root.bar.foreground
+          enabled: !!root.music && root.music.bridgeActive
+          opacity: enabled ? 1 : 0.4
+          onClicked: root.music.toggleDislike()
+        }
+      }
+
       PanelSeparator { foreground: root.bar.foreground }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(4)
+        visible: root.showQueue && !!root.music && root.music.upNext.length > 0
+
+        Text {
+          width: parent.width
+          text: "Up next"
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Repeater {
+          model: root.showQueue && root.music ? root.music.upNext.slice(0, 6) : []
+
+          Item {
+            id: queueRow
+            required property var modelData
+            width: parent.width
+            height: queueLabel.implicitHeight + Style.space(4)
+
+            Text {
+              id: queueLabel
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - queueDuration.implicitWidth - Style.space(10)
+              text: queueRow.modelData.title +
+                (queueRow.modelData.artist ? " — " + queueRow.modelData.artist : "")
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            Text {
+              id: queueDuration
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.music && queueRow.modelData.durationSeconds > 0
+                ? Model.formatTime(queueRow.modelData.durationSeconds) : ""
+              color: Qt.darker(root.bar.foreground, 1.6)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.music.jumpToQueueIndex(queueRow.modelData.index)
+            }
+          }
+        }
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(4)
+        visible: root.showRecentlyPlayed && !!root.music && root.music.recentTracks.length > 0
+
+        PanelSeparator { foreground: root.bar.foreground }
+
+        Text {
+          width: parent.width
+          text: "Recently played"
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Repeater {
+          model: root.showRecentlyPlayed && root.music
+            ? root.music.recentTracks.slice(0, 5) : []
+
+          Item {
+            id: historyRow
+            required property var modelData
+            width: parent.width
+            height: historyLabel.implicitHeight + Style.space(4)
+
+            Text {
+              id: historyLabel
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width
+              text: historyRow.modelData.title +
+                (historyRow.modelData.artist ? " — " + historyRow.modelData.artist : "")
+              color: Qt.darker(root.bar.foreground, 1.3)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: if (root.music) root.music.openAppleMusic()
+            }
+          }
+        }
+      }
 
       Button {
         anchors.horizontalCenter: parent.horizontalCenter

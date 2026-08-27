@@ -44,6 +44,7 @@ journalctl --user --since "2 minutes ago" | grep -Ei 'apple-music|qml.*(error|wa
 - The service selects the MPRIS player whose D-Bus name ends in `.instance<PID>` where PID matches the dedicated Hyprland window. **It never falls back to the first Chromium player** — a normal YouTube tab must not be mistaken for Apple Music. Preserve this when editing `Model.selectPlayer`.
 - `Mpris.players.values` is a QML sequence, not a JS `Array`. `Array.isArray()` is unreliable on it; `Model.selectPlayer` iterates by index. Don't "fix" it to use array methods.
 - The Chromium profile is isolated at `~/.local/share/omarchy-apple-music/chromium-profile`, separate from the user's normal Chromium. `playerctl` is not required.
+- Ratings and queue data bypass MPRIS: the extension exposes `window.__omarchyAppleMusic` on the page, and `scripts/bridge-daemon` (python3 stdlib, spawned by the service) relays state/commands over Chromium's DevTools protocol (the launcher passes `--remote-debugging-port=0`; the port comes from `DevToolsActivePort` in the profile dir). The service trusts bridge state only while its `trackTitle` matches MPRIS's, and sends commands as JSON files under `~/.local/share/omarchy-apple-music/bridge-commands/` that the daemon consumes.
 
 ## Bar widget conventions
 

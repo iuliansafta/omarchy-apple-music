@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Bridge between the Omarchy bar plugin and the dedicated Apple Music browser.
+
+The Chromium extension (extension/duration-bridge.js) exposes
+window.__omarchyAppleMusic = { collect, command } on music.apple.com. This
+daemon, started by the QML service, relays both directions over Chromium's
+DevTools protocol:
+
+  - once per second it evaluates collect() and prints the result as one JSON
+    line on stdout ({"ok": false} when no browser/page/bridge is available);
+  - it polls COMMANDS_DIR for *.json command payloads, evaluates
+    command(payload) in the page, and deletes the file after execution.
+
+Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR
+
+Only the Python standard library is used; the WebSocket client is hand-rolled
+(no CDP library ships with Python).
+"""
+
+import base64
+import json
+import os
+import socket
+import struct
+import sys
+import time
+import urllib.request
+
+POLL_INTERVAL = 1.0
+EVAL_TIMEOUT = 6.0
+MAX_COMMAND_ATTEMPTS = 3
+
+
+class ProtocolError(Exception):
+    pass
+
+
+class CdpClient:
+    """Minimal CDP-over-WebSocket client for Runtime.evaluate."""
+
+    def __init__(self, host, port, path):
+        self._sock = socket.create_connection((host, port), timeout=5)
+        self._sock.settimeout(5)
+        key = base64.b64encode(os.urandom(16)).decode()
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        self._sock.sendall(request.encode())
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ProtocolError("connection closed during handshake")
+            response += chunk
+        head, _, rest = response.partition(b"\r\n\r\n")
+        status = head.split(b"\r\n")[0]
+        if b" 101 " not in status:
+            raise ProtocolError("websocket handshake rejected: " + status.decode("latin1"))
+        # No permessage-deflate was offered, so frames arrive uncompressed.
+        self._buf = rest
+        self._next_id = 0
+
+    def _read_exact(self, count, deadline):
+        while len(self._buf) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProtocolError("timeout waiting for websocket data")
+            self._sock.settimeout(min(remaining, 1.0))
+            try:
+                chunk = self._sock.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError as error:
+                raise ProtocolError("socket error: " + str(error))
+            if not chunk:
+                raise ProtocolError("connection closed")
+            self._buf += chunk
+        out, self._buf = self._buf[:count], self._buf[count:]
+        return out
+
+    def _read_frame(self, deadline):
+        first, second = self._read_exact(2, deadline)
+        fin = bool(first & 0x80)
+        opcode = first & 0x0F
+        length = second & 0x7F
+        if second & 0x80:
+            raise ProtocolError("unexpectedly masked server frame")
+        if length == 126:
+            length = struct.unpack(">H", self._read_exact(2, deadline))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
+        payload = self._read_exact(length, deadline) if length else b""
+        return fin, opcode, payload
+
+    def _send_frame(self, opcode, payload=b""):
+        mask = os.urandom(4)
+        length = len(payload)
+        if length < 126:
+            header = struct.pack(">BB", 0x80 | opcode, 0x80 | length)
+        elif length < 65536:
+            header = struct.pack(">BBH", 0x80 | opcode, 0x80 | 126, length)
+        else:
+            header = struct.pack(">BBQ", 0x80 | opcode, 0x80 | 127, length)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self._sock.sendall(header + mask + masked)
+
+    def _read_message(self, deadline):
+        chunks = []
+        while True:
+            fin, opcode, payload = self._read_frame(deadline)
+            if opcode == 9:  # ping
+                self._send_frame(10, payload)
+                continue
+            if opcode == 8:
+                raise ProtocolError("server sent close frame")
+            if opcode in (1, 2):
+                chunks = [payload]
+            elif opcode == 0 and chunks:
+                chunks.append(payload)
+            else:
+                continue
+            if fin:
+                return b"".join(chunks)
+
+    def call(self, method, params, timeout=EVAL_TIMEOUT):
+        self._next_id += 1
+        msg_id = self._next_id
+        deadline = time.monotonic() + timeout
+        message = json.dumps({"id": msg_id, "method": method, "params": params})
+        self._send_frame(1, message.encode())
+        while True:
+            payload = self._read_message(deadline)
+            try:
+                parsed = json.loads(payload.decode())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if parsed.get("id") != msg_id:
+                continue  # stray event; our domains emit few, but stay safe
+            if "error" in parsed:
+                raise ProtocolError("CDP error: " + json.dumps(parsed["error"]))
+            return parsed.get("result", {})
+
+    def evaluate(self, expression, timeout=EVAL_TIMEOUT):
+        result = self.call(
+            "Runtime.evaluate",
+            {"expression": expression, "awaitPromise": True, "returnByValue": True},
+            timeout,
+        )
+        details = result.get("exceptionDetails")
+        if details:
+            raise ProtocolError("page exception: " + str(details.get("text", "")))
+        return result.get("result", {}).get("value")
+
+    def close(self):
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def read_devtools_port(profile_dir):
+    # Chromium writes the chosen port here when launched with
+    # --remote-debugging-port=0.
+    try:
+        with open(os.path.join(profile_dir, "DevToolsActivePort")) as handle:
+            port = int(handle.readline().strip() or 0)
+            return port or None
+    except (OSError, ValueError):
+        return None
+
+
+def find_page_target(port):
+    url = f"http://127.0.0.1:{port}/json/list"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            targets = json.load(response)
+    except (OSError, ValueError):
+        return None
+    for target in targets:
+        if target.get("type") == "page" and str(target.get("url", "")).startswith("https://music.apple.com"):
+            return target.get("webSocketDebuggerUrl")
+    return None
+
+
+def connect(profile_dir):
+    port = read_devtools_port(profile_dir)
+    if not port:
+        return None
+    ws_url = find_page_target(port)
+    if not ws_url:
+        return None
+    _, _, path = ws_url.partition("127.0.0.1:")
+    slash = path.find("/")
+    if slash < 0:
+        return None
+    try:
+        return CdpClient("127.0.0.1", int(path[:slash]), path[slash:])
+    except (OSError, ValueError, ProtocolError) as error:
+        print("bridge-daemon: connect failed: " + str(error), file=sys.stderr, flush=True)
+        return None
+
+
+def consume_commands(client, commands_dir, attempts):
+    try:
+        names = sorted(n for n in os.listdir(commands_dir) if n.endswith(".json"))
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(commands_dir, name)
+        try:
+            with open(path) as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"bridge-daemon: bad command {name}: {error}", file=sys.stderr, flush=True)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            continue
+        expression = "window.__omarchyAppleMusic ? window.__omarchyAppleMusic.command(" \
+                     + json.dumps(payload) + ") : null"
+        try:
+            value = client.evaluate(expression)
+        except ProtocolError as error:
+            # Connection trouble: keep the file for a bounded number of retries.
+            attempts[name] = attempts.get(name, 0) + 1
+            print(f"bridge-daemon: command retry {name}: {error}", file=sys.stderr, flush=True)
+            if attempts[name] >= MAX_COMMAND_ATTEMPTS:
+                attempts.pop(name, None)
+                _drop(path, name)
+            return  # the socket is probably dead; stop consuming this round
+        attempts.pop(name, None)
+        if isinstance(value, dict) and value.get("ok") is False:
+            # The page understood the command but could not apply it (e.g. the
+            # queue was still loading). Retry a bounded number of times.
+            attempts[name] = attempts.get(name, 0) + 1
+            print(f"bridge-daemon: command retry {name}: {value}", file=sys.stderr, flush=True)
+            if attempts[name] >= MAX_COMMAND_ATTEMPTS:
+                attempts.pop(name, None)
+                _drop(path, name)
+            continue
+        _drop(path, name)
+
+
+def _drop(path, name):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    print(f"bridge-daemon: command consumed: {name}", file=sys.stderr, flush=True)
+def main():
+    if len(sys.argv) != 3:
+        print("Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR", file=sys.stderr)
+        return 2
+    profile_dir, commands_dir = sys.argv[1], sys.argv[2]
+    os.makedirs(commands_dir, exist_ok=True)
+
+    client = None
+    attempts = {}
+    while True:
+        if client is None:
+            client = connect(profile_dir)
+        state = {"ok": False}
+        if client is not None:
+            try:
+                value = client.evaluate(
+                    "window.__omarchyAppleMusic ? window.__omarchyAppleMusic.collect() : null"
+                )
+                if isinstance(value, dict):
+                    state = value
+                consume_commands(client, commands_dir, attempts)
+            except ProtocolError as error:
+                print("bridge-daemon: session dropped: " + str(error), file=sys.stderr, flush=True)
+        try:
+            print(json.dumps(state), flush=True)
+        except BrokenPipeError:
+            return 0  # the service stopped reading; exit quietly
+        time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

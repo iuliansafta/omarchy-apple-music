@@ -40,4 +40,61 @@ assert.equal(
   null
 )
 
+// Queue normalization and the up-next window carry absolute indices so the
+// bar can jump to any entry after the current one.
+const item = {
+  attributes: {
+    name: "Up Next Song",
+    artistName: "Someone",
+    durationInMillis: 200000,
+    playParams: { id: "song-1", kind: "songs" }
+  }
+}
+const entry = bridge.normalizeQueueEntry(item, 3)
+assert.equal(entry.index, 3)
+assert.equal(entry.id, "song-1")
+assert.equal(entry.title, "Up Next Song")
+assert.equal(entry.durationSeconds, 200)
+assert.equal(bridge.normalizeQueueEntry(null, 0), null)
+assert.equal(bridge.normalizeQueueEntry({ attributes: {} }, 0), null)
+
+const queueItems = [
+  { attributes: { name: "One", playParams: { id: "a" } } },
+  { attributes: { name: "Two", playParams: { id: "b" } } },
+  { attributes: { name: "Three", playParams: { id: "c" } } },
+  null,
+  { attributes: { name: "Five", playParams: { id: "e" } } }
+]
+const upNext = bridge.upNextEntries(queueItems, 1, 2)
+assert.equal(upNext.length, 2)
+assert.equal(upNext[0].index, 2)
+assert.equal(upNext[1].index, 4)
+assert.deepEqual(bridge.upNextEntries([], 0, 5), [])
+
+assert.equal(bridge.ratingStateForValue(1), "like")
+assert.equal(bridge.ratingStateForValue(null), "none")
+assert.equal(bridge.ratingStateForValue("junk"), "unknown")
+assert.equal(bridge.ratingStateForValue(0), "none")
+assert.equal(bridge.ratingKind({ attributes: { playParams: { kind: "songs", id: "x" } } }), "songs")
+assert.equal(bridge.ratingKind({ attributes: { playParams: { kind: "library-songs", id: "i.x" } } }), "library-songs")
+assert.equal(bridge.playableId(item), "song-1")
+assert.equal(bridge.playableId(null), "")
+
+// Public queue is preferred over the private controller fallback.
+const publicContext = bridge.queueContext({ player: { queue: { items: queueItems, position: 2 } } })
+assert.equal(publicContext.items, queueItems)
+assert.equal(publicContext.position, 2)
+assert.equal(bridge.queueContext({ player: { queue: { items: [], position: null } } }), null)
+assert.equal(bridge.queueContext(null), null)
+const privateQueue = {
+  _queueItems: [{ item: item }],
+  currentItem: item
+}
+const privateContext = bridge.queueContext({ _playbackController: { _queue: privateQueue } })
+assert.equal(privateContext.items.length, 1)
+assert.equal(privateContext.position, 0)
+
+// Without MusicKit the collector reports a dead bridge instead of throwing.
+assert.deepEqual(bridge.collectBridgeState(), { ok: false })
+
 console.log("duration bridge tests passed")
