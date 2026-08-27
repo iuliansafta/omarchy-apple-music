@@ -374,12 +374,12 @@ BarWidget {
         }
       }
 
-      PanelSeparator { foreground: root.bar.foreground }
-
       Column {
         width: parent.width
         spacing: Style.space(4)
         visible: root.showQueue && !!root.music && root.music.upNext.length > 0
+
+        PanelSeparator { foreground: root.bar.foreground }
 
         Text {
           width: parent.width
