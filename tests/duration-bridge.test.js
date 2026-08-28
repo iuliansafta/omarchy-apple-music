@@ -97,4 +97,74 @@ assert.equal(privateContext.position, 0)
 // Without MusicKit the collector reports a dead bridge instead of throwing.
 assert.deepEqual(bridge.collectBridgeState(), { ok: false })
 
+
+// ---- Playback modes ----
+
+// Every observed MusicKit repeat representation normalizes; anything else is
+// "unknown", never a definite off.
+assert.equal(bridge.normalizeRepeat(0), "none")
+assert.equal(bridge.normalizeRepeat(1), "one")
+assert.equal(bridge.normalizeRepeat(2), "all")
+assert.equal(bridge.normalizeRepeat("none"), "none")
+assert.equal(bridge.normalizeRepeat(" ONE "), "one")
+assert.equal(bridge.normalizeRepeat(3), "unknown")
+assert.equal(bridge.normalizeRepeat("bogus"), "unknown")
+assert.equal(bridge.normalizeRepeat(null), "unknown")
+assert.equal(bridge.normalizeRepeat(undefined), "unknown")
+assert.equal(bridge.normalizeRepeat(NaN), "unknown")
+assert.equal(bridge.normalizeRepeat(true), "unknown")
+
+assert.equal(bridge.normalizeShuffle(0), false)
+assert.equal(bridge.normalizeShuffle(1), true)
+// The live setter clamps albums(2) back to songs(1); still "on" if it lands.
+assert.equal(bridge.normalizeShuffle(2), true)
+assert.equal(bridge.normalizeShuffle(true), true)
+assert.equal(bridge.normalizeShuffle(false), false)
+assert.equal(bridge.normalizeShuffle(3), null)
+assert.equal(bridge.normalizeShuffle("yes"), null)
+assert.equal(bridge.normalizeShuffle(null), null)
+assert.equal(bridge.normalizeShuffle(undefined), null)
+
+assert.equal(bridge.normalizeAutoplay(true), true)
+assert.equal(bridge.normalizeAutoplay(false), false)
+assert.equal(bridge.normalizeAutoplay(null), null)
+assert.equal(bridge.normalizeAutoplay(undefined), null)
+assert.equal(bridge.normalizeAutoplay("on"), null)
+
+// Mode commands validate payloads before touching MusicKit: invalid ones
+// leave the instance untouched, valid ones apply the documented mapping.
+const modeStub = {}
+global.window = { MusicKit: { getInstance: function() { return modeStub } } }
+
+bridge.handleCommand({ action: "set-shuffle", enabled: "yes" })
+assert.ok(!("shuffleMode" in modeStub))
+bridge.handleCommand({ action: "set-shuffle", enabled: true })
+assert.equal(modeStub.shuffleMode, 1)
+bridge.handleCommand({ action: "set-shuffle", enabled: false })
+assert.equal(modeStub.shuffleMode, 0)
+
+bridge.handleCommand({ action: "set-repeat", mode: "all" })
+assert.equal(modeStub.repeatMode, 2)
+bridge.handleCommand({ action: "set-repeat", mode: "one" })
+assert.equal(modeStub.repeatMode, 1)
+bridge.handleCommand({ action: "set-repeat", mode: 2 })
+assert.equal(modeStub.repeatMode, 1) // non-string mode rejected
+
+bridge.handleCommand({ action: "set-autoplay", enabled: true })
+assert.equal(modeStub.autoplayEnabled, true)
+bridge.handleCommand({ action: "set-autoplay" })
+assert.equal(modeStub.autoplayEnabled, true) // missing payload rejected
+
+// collectBridgeState surfaces normalized mode state; a missing property
+// stays null/unknown instead of masquerading as off.
+modeStub.shuffleMode = 1
+modeStub.repeatMode = 2
+delete modeStub.autoplayEnabled
+const modeState = bridge.collectBridgeState()
+assert.equal(modeState.ok, true)
+assert.equal(modeState.shuffle, true)
+assert.equal(modeState.repeat, "all")
+assert.equal(modeState.autoplay, null)
+
+delete global.window
 console.log("duration bridge tests passed")

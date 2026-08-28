@@ -30,6 +30,17 @@ Item {
   readonly property string historyPath: dataRoot + "/history.jsonl"
   readonly property string bridgeDaemonPath:
     Qt.resolvedUrl("scripts/bridge-daemon").toString().replace(/^file:\/\//, "")
+  // Playback modes from the bridge (MusicKit is the single authoritative
+  // source). null/"unknown" means the real state is unavailable — the UI
+  // must never render that as a definite off.
+  readonly property var shuffleMode:
+    bridgeActive && bridgeState && typeof bridgeState.shuffle === "boolean"
+    ? bridgeState.shuffle : null
+  readonly property string repeatMode:
+    bridgeActive && bridgeState && bridgeState.repeat ? String(bridgeState.repeat) : "unknown"
+  readonly property var autoplay:
+    bridgeActive && bridgeState && typeof bridgeState.autoplay === "boolean"
+    ? bridgeState.autoplay : null
 
   readonly property bool bridgeActive: available && Model.bridgeIsActive(bridgeState, title)
   readonly property string rating:
@@ -103,6 +114,22 @@ Item {
 
   function toggleDislike() {
     rate(rating === "dislike" ? 0 : -1)
+  }
+
+  function setShuffle(enabled) {
+    sendBridgeCommand({ action: "set-shuffle", enabled: !!enabled })
+  }
+
+  // Cycles Off → Repeat All → Repeat One → Off using the normalized string
+  // state, never numeric enum ordering. An unknown state simply starts the
+  // cycle at its beginning ("all" comes first after Off).
+  function cycleRepeat() {
+    var next = repeatMode === "all" ? "one" : repeatMode === "one" ? "none" : "all"
+    sendBridgeCommand({ action: "set-repeat", mode: next })
+  }
+
+  function setAutoplay(enabled) {
+    sendBridgeCommand({ action: "set-autoplay", enabled: !!enabled })
   }
 
   function jumpToQueueIndex(index) {
@@ -276,6 +303,9 @@ Item {
         length: root.hasValidLength ? root.trackLength : null,
         canSeek: root.canSeek,
         rating: root.rating,
+        shuffle: root.shuffleMode,
+        repeat: root.repeatMode,
+        autoplay: root.autoplay,
         bridgeActive: root.bridgeActive,
         upNext: root.upNext,
         recentTracks: root.recentTracks
@@ -290,6 +320,9 @@ Item {
     function setRating(value: int): void { root.rate(value) }
     function like(): void { root.toggleLike() }
     function dislike(): void { root.toggleDislike() }
+    function setShuffle(enabled: bool): void { root.setShuffle(enabled) }
+    function cycleRepeat(): void { root.cycleRepeat() }
+    function setAutoplay(enabled: bool): void { root.setAutoplay(enabled) }
     function jumpTo(index: int): void { root.jumpToQueueIndex(index) }
   }
 }

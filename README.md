@@ -16,6 +16,7 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 - Like and dislike for the current song, synced to the Apple Music library
 - Up-next queue with click-to-jump
 - Recently played history, persisted across shell and machine restarts
+- Shuffle, repeat (off/all/one), and autoplay controls, synced with Apple Music
 - Player panel with a blurred artwork backdrop
 
 ## Requirements
@@ -88,6 +89,12 @@ The plugin bundles a minimal extension, restricted to `https://music.apple.com/*
 ## Ratings and queue
 
 Chromium's Media Session cannot carry ratings or queue contents, so those travel a different path: the bundled extension also exposes a `collect`/`command` hook on the page, and a small daemon (`scripts/bridge-daemon`, spawned by the plugin service) relays it over Chromium's DevTools protocol — which the dedicated browser enables with `--remote-debugging-port=0` on a localhost-only port. Ratings are read and written through Apple Music's own ratings API with the tokens MusicKit already holds in the page. If Apple Music Web changes its internals, rating and queue features degrade to hidden while duration bridging and playback controls keep working.
+
+## Playback modes
+
+The player panel has a shuffle / repeat / autoplay row next to the rating controls. All three are read from and written through MusicKit on the Apple Music page (the single source of truth — Chromium's Media Session cannot carry them, and MPRIS has no autoplay concept), so the controls always show the state Apple Music itself reports, including changes made inside Apple Music. Repeat cycles Off → Repeat All → Repeat One → Off. When the bridge is unavailable the row hides and ordinary MPRIS transport keeps working.
+
+Autoplay means Apple Music's infinite continuation of the queue (recommended tracks after your queue ends), not automatic application launch.
 
 ## Remove
 

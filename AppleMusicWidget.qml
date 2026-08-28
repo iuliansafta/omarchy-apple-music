@@ -19,12 +19,20 @@ BarWidget {
   readonly property bool hideWhenNotRunning: setting("hideWhenNotRunning", true)
   readonly property bool showQueue: setting("showQueue", true)
   readonly property bool showRecentlyPlayed: setting("showRecentlyPlayed", true)
+  readonly property bool showPlaybackModes: setting("showPlaybackModes", true)
   // Nerd Font nf-md glyphs, resolved from CaskaydiaMono Nerd Font's cmap:
   // md-heart, md-heart_outline, md-thumb_down, md-thumb_down_outline
   readonly property string heartIcon: String.fromCodePoint(0xf02d1)
   readonly property string heartOutlineIcon: String.fromCodePoint(0xf02d5)
   readonly property string thumbDownIcon: String.fromCodePoint(0xf0511)
   readonly property string thumbDownOutlineIcon: String.fromCodePoint(0xf0512)
+  // nf-md-shuffle, nf-md-repeat, nf-md-repeat_once, nf-md-repeat_off,
+  // nf-md-autoplay — all verified present in CaskaydiaMono Nerd Font's cmap.
+  readonly property string shuffleIcon: String.fromCodePoint(0xf1022)
+  readonly property string repeatIcon: String.fromCodePoint(0xf0459)
+  readonly property string repeatOnceIcon: String.fromCodePoint(0xf045a)
+  readonly property string repeatOffIcon: String.fromCodePoint(0xf045b)
+  readonly property string autoplayIcon: String.fromCodePoint(0xf0ab5)
   visible: !hideWhenNotRunning || (music && music.running)
   readonly property string trackLabel: {
     if (!music || !music.hasMedia) return "Music"
@@ -371,6 +379,53 @@ BarWidget {
           enabled: !!root.music && root.music.bridgeActive
           opacity: enabled ? 1 : 0.4
           onClicked: root.music.toggleDislike()
+        }
+      }
+
+      // Playback modes: shuffle, repeat, autoplay. State always comes from
+      // the reflected bridge state (MusicKit authoritative); a control whose
+      // real state is unavailable is disabled rather than shown as off.
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(8)
+        visible: root.showPlaybackModes && !!root.music && root.music.bridgeActive
+
+        Button {
+          width: Style.space(44)
+          height: Style.space(40)
+          iconText: root.shuffleIcon
+          foreground: root.music && root.music.shuffleMode === true
+            ? Color.accent : root.bar.foreground
+          enabled: !!root.music && root.music.shuffleMode !== null
+          opacity: enabled ? 1 : 0.4
+          Accessible.name: "Shuffle"
+          onClicked: root.music.setShuffle(root.music.shuffleMode !== true)
+        }
+
+        Button {
+          width: Style.space(44)
+          height: Style.space(40)
+          iconText: !root.music || root.music.repeatMode === "all" ? root.repeatIcon
+            : root.music.repeatMode === "one" ? root.repeatOnceIcon : root.repeatOffIcon
+          foreground: root.music && (root.music.repeatMode === "all" || root.music.repeatMode === "one")
+            ? Color.accent : root.bar.foreground
+          enabled: !!root.music && root.music.repeatMode !== "unknown"
+          opacity: enabled ? 1 : 0.4
+          Accessible.name: root.music && root.music.repeatMode === "one"
+            ? "Repeat one" : root.music && root.music.repeatMode === "all" ? "Repeat all" : "Repeat off"
+          onClicked: root.music.cycleRepeat()
+        }
+
+        Button {
+          width: Style.space(44)
+          height: Style.space(40)
+          iconText: root.autoplayIcon
+          foreground: root.music && root.music.autoplay === true
+            ? Color.accent : root.bar.foreground
+          enabled: !!root.music && root.music.autoplay !== null
+          opacity: enabled ? 1 : 0.4
+          Accessible.name: "Autoplay"
+          onClicked: root.music.setAutoplay(root.music.autoplay !== true)
         }
       }
 

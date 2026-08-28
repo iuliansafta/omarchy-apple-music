@@ -101,6 +101,39 @@ function ratingStateForValue(value) {
   return "unknown"
 }
 
+// Playback modes (shuffle/repeat/autoplay). Verified against the live web
+// player (MusicKit JS 3.2632.1): shuffleMode and repeatMode are writable
+// numeric prototype accessors on the instance (0 = none, 1 = songs/one,
+// 2 = albums/all; the setter clamps shuffle 2 back to 1), autoplayEnabled is
+// a boolean. No public enums are exposed in this build, so the mapping is
+// pinned here and every read is normalized before the UI sees it.
+var REPEAT_MODES = { none: 0, one: 1, all: 2 }
+
+function normalizeShuffle(value) {
+  if (typeof value === "boolean") return value
+  if (typeof value === "number" && (value === 0 || value === 1 || value === 2)) {
+    return value !== 0
+  }
+  return null
+}
+
+function normalizeRepeat(value) {
+  if (typeof value === "string") {
+    var key = value.trim().toLowerCase()
+    return REPEAT_MODES.hasOwnProperty(key) ? key : "unknown"
+  }
+  if (typeof value === "number" && Number.isInteger(value)) {
+    for (var mode in REPEAT_MODES) {
+      if (REPEAT_MODES[mode] === value) return mode
+    }
+  }
+  return "unknown"
+}
+
+function normalizeAutoplay(value) {
+  return typeof value === "boolean" ? value : null
+}
+
 function normalizeQueueEntry(item, index) {
   var attributes = item && item.attributes
   if (!attributes || !attributes.name) return null
@@ -238,7 +271,10 @@ function collectBridgeState() {
         ? ratingCache.state : "unknown",
       queuePosition: position,
       queueLength: context ? context.items.length : 0,
-      upNext: context ? upNextEntries(context.items, position, 20) : []
+      upNext: context ? upNextEntries(context.items, position, 20) : [],
+      shuffle: normalizeShuffle(music.shuffleMode),
+      repeat: normalizeRepeat(music.repeatMode),
+      autoplay: normalizeAutoplay(music.autoplayEnabled)
     }
   } catch (_) {
     return { ok: false }
@@ -298,6 +334,7 @@ function handleCommand(payload) {
       var context = queueContext(music)
       var target = context && context.items[index]
       if (!target) return Promise.resolve({ ok: false, error: "bad-index" })
+
       if (typeof music.playMediaItem === "function") {
         return music.playMediaItem(target)
           .then(function() { return { ok: true } })
@@ -310,6 +347,31 @@ function handleCommand(payload) {
       return player.changeToMediaAtIndex(index)
         .then(function() { return { ok: true } })
         .catch(function() { return { ok: false, error: "jump-failed" } })
+    }
+    if (action === "set-shuffle") {
+      if (typeof payload.enabled !== "boolean") {
+        return Promise.resolve({ ok: false, error: "bad-payload" })
+      }
+      music.shuffleMode = payload.enabled ? 1 : 0
+      return Promise.resolve({ ok: true })
+    }
+
+    if (action === "set-repeat") {
+      var mode = typeof payload.mode === "string"
+        ? payload.mode.trim().toLowerCase() : ""
+      if (!REPEAT_MODES.hasOwnProperty(mode)) {
+        return Promise.resolve({ ok: false, error: "bad-payload" })
+      }
+      music.repeatMode = REPEAT_MODES[mode]
+      return Promise.resolve({ ok: true })
+    }
+
+    if (action === "set-autoplay") {
+      if (typeof payload.enabled !== "boolean") {
+        return Promise.resolve({ ok: false, error: "bad-payload" })
+      }
+      music.autoplayEnabled = payload.enabled
+      return Promise.resolve({ ok: true })
     }
     return Promise.resolve({ ok: false, error: "unknown-action" })
   } catch (_) {
@@ -340,6 +402,9 @@ if (typeof module !== "undefined") {
     playableId: playableId,
     ratingKind: ratingKind,
     ratingStateForValue: ratingStateForValue,
+    normalizeShuffle: normalizeShuffle,
+    normalizeRepeat: normalizeRepeat,
+    normalizeAutoplay: normalizeAutoplay,
     normalizeQueueEntry: normalizeQueueEntry,
     queueContext: queueContext,
     upNextEntries: upNextEntries,

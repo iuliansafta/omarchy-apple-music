@@ -27,6 +27,7 @@
       "maxLabelWidth": 220,
       "hideWhenNotRunning": true,
       "showQueue": true,
+      "showPlaybackModes": true,
       "showRecentlyPlayed": true
     },
     "schema": [
@@ -55,6 +56,12 @@
         "key": "showQueue",
         "type": "boolean",
         "label": "Show up-next queue",
+        "defaultValue": true
+      },
+      {
+        "key": "showPlaybackModes",
+        "type": "boolean",
+        "label": "Show playback mode controls (shuffle, repeat, autoplay)",
         "defaultValue": true
       },
       {
