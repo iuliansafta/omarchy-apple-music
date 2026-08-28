@@ -52,15 +52,51 @@ function upNextFromState(state) {
   return state && Array.isArray(state.upNext) ? state.upNext : []
 }
 
+// History records may carry a "play" descriptor identifying the exact song,
+// same shape the extension produces: { kind: "song", id, catalogId? }.
+// Malformed or missing descriptors parse as null, keeping legacy records
+// readable but non-replayable.
+function historyPlaybackDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  var id = typeof value.id === "string" ? value.id : ""
+  if (!id || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return null
+  if (typeof value.kind !== "undefined" && value.kind !== "song") return null
+  var descriptor = { kind: "song", id: id }
+  if (typeof value.catalogId === "string" && value.catalogId !== "") {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.catalogId)) return null
+    descriptor.catalogId = value.catalogId
+  }
+  return descriptor
+}
+
 function historyLogKey(title, artist) {
   return String(title || "").trim().toLowerCase() + "|" + String(artist || "").trim().toLowerCase()
 }
 
-function parseHistoryLines(text, cap) {
+// Entries are already newest-first. Keep only the newest occurrence of each
+// title/artist pair so replaying a song moves it to the top instead of adding
+// another visible row. Title/artist also deduplicates legacy records that do
+// not carry a MusicKit playback descriptor.
+function uniqueHistoryEntries(entries, cap) {
   var limit = Number(cap) || 0
+  var result = []
+  var seen = {}
+  var list = Array.isArray(entries) ? entries : []
+  for (var i = 0; i < list.length && (!limit || result.length < limit); i++) {
+    var entry = list[i]
+    if (!entry) continue
+    var key = historyLogKey(entry.title, entry.artist)
+    if (seen[key]) continue
+    seen[key] = true
+    result.push(entry)
+  }
+  return result
+}
+
+function parseHistoryLines(text, cap) {
   var lines = String(text || "").split("\n")
   var entries = []
-  for (var i = lines.length - 1; i >= 0 && (!limit || entries.length < limit); i--) {
+  for (var i = lines.length - 1; i >= 0; i--) {
     var line = lines[i].trim()
     if (!line) continue
     try {
@@ -71,14 +107,15 @@ function parseHistoryLines(text, cap) {
           title: String(entry.title),
           artist: String(entry.artist || ""),
           album: String(entry.album || ""),
-          art: String(entry.art || "")
+          art: String(entry.art || ""),
+          play: historyPlaybackDescriptor(entry.play)
         })
       }
     } catch (_) {
       // A torn or foreign line is skipped, never fatal.
     }
   }
-  return entries
+  return uniqueHistoryEntries(entries, cap)
 }
 
 function historyAppendBashScript() {
@@ -99,6 +136,8 @@ if (typeof module !== "undefined") {
     bridgeIsActive: bridgeIsActive,
     upNextFromState: upNextFromState,
     historyLogKey: historyLogKey,
+    uniqueHistoryEntries: uniqueHistoryEntries,
+    historyPlaybackDescriptor: historyPlaybackDescriptor,
     parseHistoryLines: parseHistoryLines,
     historyAppendBashScript: historyAppendBashScript
   }

@@ -228,21 +228,18 @@ def consume_commands(client, commands_dir, attempts):
         try:
             value = client.evaluate(expression)
         except ProtocolError as error:
-            # Connection trouble: keep the file for a bounded number of retries.
-            attempts[name] = attempts.get(name, 0) + 1
-            print(f"bridge-daemon: command retry {name}: {error}", file=sys.stderr, flush=True)
-            if attempts[name] >= MAX_COMMAND_ATTEMPTS:
-                attempts.pop(name, None)
+            # Connection trouble: keep the file for a bounded number of
+            # retries across reconnects.
+            if note_command_failure(name, attempts):
+                print(f"bridge-daemon: command dropped after retries: {name}", file=sys.stderr, flush=True)
                 _drop(path, name)
             return  # the socket is probably dead; stop consuming this round
         attempts.pop(name, None)
         if isinstance(value, dict) and value.get("ok") is False:
             # The page understood the command but could not apply it (e.g. the
             # queue was still loading). Retry a bounded number of times.
-            attempts[name] = attempts.get(name, 0) + 1
-            print(f"bridge-daemon: command retry {name}: {value}", file=sys.stderr, flush=True)
-            if attempts[name] >= MAX_COMMAND_ATTEMPTS:
-                attempts.pop(name, None)
+            if note_command_failure(name, attempts):
+                print(f"bridge-daemon: command dropped after retries: {name}", file=sys.stderr, flush=True)
                 _drop(path, name)
             continue
         _drop(path, name)
@@ -254,6 +251,29 @@ def _drop(path, name):
     except OSError:
         pass
     print(f"bridge-daemon: command consumed: {name}", file=sys.stderr, flush=True)
+
+
+def note_command_failure(name, attempts):
+    """Record a failed attempt for a command; return True when it must be
+    dropped. The counter is bounded, so a command is never retried forever,
+    and the counter survives reconnects so a transient disconnect does not
+    silently discard the pending command file."""
+    count = attempts.get(name, 0) + 1
+    if count >= MAX_COMMAND_ATTEMPTS:
+        attempts.pop(name, None)
+        return True
+    attempts[name] = count
+    return False
+
+
+def close_client(client):
+    """Close a CdpClient (if any) and return None so callers can clear their
+    slot and rediscover a fresh port/page target on the next loop."""
+    if client is not None:
+        client.close()
+    return None
+
+
 def main():
     if len(sys.argv) != 3:
         print("Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR", file=sys.stderr)
@@ -276,7 +296,14 @@ def main():
                     state = value
                 consume_commands(client, commands_dir, attempts)
             except ProtocolError as error:
+                # The socket or page target is gone (browser closed, page
+                # replaced, WebSocket dropped). Drop the client so the next
+                # loop rediscovers DevToolsActivePort and the Apple Music
+                # page instead of reusing a known-dead socket. Pending
+                # command files survive in the bounded retry state.
                 print("bridge-daemon: session dropped: " + str(error), file=sys.stderr, flush=True)
+                client = close_client(client)
+                state = {"ok": False}
         try:
             print(json.dumps(state), flush=True)
         except BrokenPipeError:

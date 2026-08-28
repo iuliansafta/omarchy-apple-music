@@ -43,6 +43,57 @@ assert.equal(history[0].title, "C")
 assert.equal(history[1].title, "B")
 assert.equal(history[1].album, "Album")
 assert.equal(model.parseHistoryLines("", 10).length, 0)
+// Recently played is unique by normalized title/artist. The newest play wins,
+// including for legacy entries that do not carry a playback descriptor.
+const repeats = model.parseHistoryLines([
+  JSON.stringify({ ts: 10, title: "A", artist: "X" }),
+  JSON.stringify({ ts: 15, title: "B", artist: "Y" }),
+  JSON.stringify({ ts: 20, title: " a ", artist: "x" })
+].join("\n"), 10)
+assert.equal(repeats.length, 2)
+assert.equal(repeats[0].ts, 20)
+assert.equal(repeats[1].title, "B")
+// The cap counts unique songs, so duplicate lines do not hide older distinct
+// entries that still fit in the visible list.
+const cappedUnique = model.parseHistoryLines([
+  JSON.stringify({ ts: 1, title: "Older", artist: "Artist" }),
+  JSON.stringify({ ts: 2, title: "Repeat", artist: "Artist" }),
+  JSON.stringify({ ts: 3, title: "Repeat", artist: "Artist" })
+].join("\n"), 2)
+assert.deepEqual(cappedUnique.map(entry => entry.title), ["Repeat", "Older"])
+const movedToTop = model.uniqueHistoryEntries([
+  { ts: 4, title: "Older", artist: "Artist" },
+  { ts: 3, title: "Repeat", artist: "Artist" },
+  { ts: 1, title: "Older", artist: "Artist" }
+], 10)
+assert.deepEqual(movedToTop.map(entry => entry.ts), [4, 3])
+// Legacy entries with missing optional fields stay readable.
+const legacy = model.parseHistoryLines(JSON.stringify({ ts: 5, title: "Old" }), 5)
+assert.equal(legacy.length, 1)
+assert.equal(legacy[0].artist, "")
+assert.equal(legacy[0].album, "")
+assert.equal(legacy[0].art, "")
+
+// History entries may carry a playback descriptor; malformed ones parse as
+// null so the row stays readable but non-replayable.
+const withPlay = model.parseHistoryLines([
+  JSON.stringify({ ts: 30, title: "Dreams", artist: "Fleetwood Mac",
+    play: { kind: "song", id: "594061856" } }),
+  JSON.stringify({ ts: 31, title: "Lib", play: {
+    kind: "song", id: "i.abc", catalogId: "42" } }),
+  JSON.stringify({ ts: 32, title: "Broken", play: { kind: "song", id: "" } }),
+  JSON.stringify({ ts: 33, title: "WrongKind", play: { kind: "albums", id: "1" } }),
+  JSON.stringify({ ts: 34, title: "Junk", play: "594061856" }),
+  JSON.stringify({ ts: 35, title: "Legacy" })
+].join("\n"), 10)
+assert.equal(withPlay.length, 6)
+assert.deepEqual(withPlay[5].play, { kind: "song", id: "594061856" })
+assert.deepEqual(withPlay[4].play, { kind: "song", id: "i.abc", catalogId: "42" })
+assert.equal(withPlay[3].play, null)
+assert.equal(withPlay[2].play, null)
+assert.equal(withPlay[1].play, null)
+assert.equal(withPlay[0].play, null)
+assert.equal(model.historyPlaybackDescriptor({ id: "1", extra: "x" }).extra, undefined)
 
 // The append script keeps the file bounded without leaving a torn line.
 const script = model.historyAppendBashScript()

@@ -17,6 +17,11 @@ Item {
   property var recentTracks: []
   property string lastHistoryKey: ""
   property int commandSequence: 0
+  // False until the persisted history file has been read once at startup;
+  // the merge in loadHistoryFinished() keeps entries appended in the
+  // meantime instead of letting the slower read overwrite them.
+  property bool historyLoaded: false
+  readonly property int recentCap: 30
 
   readonly property string dataRoot:
     (Quickshell.env("XDG_DATA_HOME") || Quickshell.env("HOME") + "/.local/share") + "/omarchy-apple-music"
@@ -25,6 +30,19 @@ Item {
   readonly property string historyPath: dataRoot + "/history.jsonl"
   readonly property string bridgeDaemonPath:
     Qt.resolvedUrl("scripts/bridge-daemon").toString().replace(/^file:\/\//, "")
+  // Playback modes from the bridge (MusicKit is the single authoritative
+  // source). null/"unknown" means the real state is unavailable — the UI
+  // must never render that as a definite off.
+  readonly property var shuffleMode:
+    bridgeActive && bridgeState && typeof bridgeState.shuffle === "boolean"
+    ? bridgeState.shuffle : null
+  readonly property string repeatMode:
+    bridgeActive && bridgeState && bridgeState.repeat ? String(bridgeState.repeat) : "unknown"
+  readonly property var autoplay:
+    bridgeActive && bridgeState && typeof bridgeState.autoplay === "boolean"
+    ? bridgeState.autoplay : null
+  readonly property string libraryState:
+    bridgeActive && bridgeState && bridgeState.library ? String(bridgeState.library) : "unknown"
 
   readonly property bool bridgeActive: available && Model.bridgeIsActive(bridgeState, title)
   readonly property string rating:
@@ -100,8 +118,28 @@ Item {
     rate(rating === "dislike" ? 0 : -1)
   }
 
+  function setShuffle(enabled) {
+    sendBridgeCommand({ action: "set-shuffle", enabled: !!enabled })
+  }
+
+  // Cycles Off → Repeat All → Repeat One → Off using the normalized string
+  // state, never numeric enum ordering. An unknown state simply starts the
+  // cycle at its beginning ("all" comes first after Off).
+  function cycleRepeat() {
+    var next = repeatMode === "all" ? "one" : repeatMode === "one" ? "none" : "all"
+    sendBridgeCommand({ action: "set-repeat", mode: next })
+  }
+
+  function setAutoplay(enabled) {
+    sendBridgeCommand({ action: "set-autoplay", enabled: !!enabled })
+  }
+
   function jumpToQueueIndex(index) {
     sendBridgeCommand({ action: "jump", index: Number(index) || 0 })
+  }
+
+  function addToLibrary() {
+    sendBridgeCommand({ action: "add-to-library" })
   }
 
   function appendHistory() {
@@ -110,14 +148,36 @@ Item {
     if (key === lastHistoryKey) return
     lastHistoryKey = key
     var entry = {
-      ts: Date.now(), title: title, artist: artist, album: album, art: artUrl
+      ts: Date.now(), title: title, artist: artist, album: album, art: artUrl,
+      // Exact-song descriptor from the matched MusicKit item; null (kept
+      // non-replayable) while the bridge is not actively matching MPRIS.
+      play: bridgeActive && bridgeState && bridgeState.play ? bridgeState.play : null
     }
-    recentTracks = [entry].concat(recentTracks).slice(0, 30)
+    recentTracks = Model.uniqueHistoryEntries([entry].concat(recentTracks), recentCap)
     historyAppendProc.command = [
       "bash", "-c", Model.historyAppendBashScript(), "sh",
       JSON.stringify(entry), historyPath
     ]
     historyAppendProc.running = true
+  }
+
+  // Replays an exact song from a history record via the bridge. Old records
+  // without a descriptor stay passive (the widget focuses Apple Music).
+  function replayTrack(entry) {
+    if (!bridgeActive || !entry || !entry.play) return
+    sendBridgeCommand({ action: "play-descriptor", descriptor: entry.play })
+  }
+
+  // One-shot load of history.jsonl at service startup. A missing, empty, or
+  // unreadable file yields empty output and an empty history — never a
+  // per-poll warning. Text → entries stays in Model.parseHistoryLines.
+  function loadHistoryFinished(text) {
+    // Newest in-memory entries (created while the startup read was in
+    // flight) win. The model then keeps only the latest occurrence of each
+    // song, including legacy records without a playback descriptor.
+    recentTracks = Model.uniqueHistoryEntries(
+      recentTracks.concat(Model.parseHistoryLines(text, 0)), recentCap)
+    historyLoaded = true
   }
 
   function togglePlayback() {
@@ -149,7 +209,14 @@ Item {
   // before the entry is written, and lastHistoryKey collapses the result.
   onTitleChanged: historyLogTimer.restart()
 
-  onRawArtUrlChanged: artSettleTimer.restart()
+  onRawArtUrlChanged: {
+    if (rawArtUrl === "") {
+      artSettleTimer.stop()
+      artUrl = ""
+    } else {
+      artSettleTimer.restart()
+    }
+  }
 
   Timer {
     id: artSettleTimer
@@ -219,11 +286,19 @@ Item {
       }
     }
   }
+  Process {
+    id: historyLoadProc
+    command: ["bash", "-c", 'cat "$1" 2>/dev/null || true', "sh", root.historyPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadHistoryFinished(String(text || ""))
+    }
+  }
+
+  Component.onCompleted: historyLoadProc.running = true
 
   Process { id: bridgeCommandProc }
-
   Process { id: historyAppendProc }
-
   IpcHandler {
     target: "iuliansafta.apple-music"
 
@@ -239,6 +314,10 @@ Item {
         length: root.hasValidLength ? root.trackLength : null,
         canSeek: root.canSeek,
         rating: root.rating,
+        shuffle: root.shuffleMode,
+        repeat: root.repeatMode,
+        autoplay: root.autoplay,
+        library: root.libraryState,
         bridgeActive: root.bridgeActive,
         upNext: root.upNext,
         recentTracks: root.recentTracks
@@ -253,6 +332,10 @@ Item {
     function setRating(value: int): void { root.rate(value) }
     function like(): void { root.toggleLike() }
     function dislike(): void { root.toggleDislike() }
+    function setShuffle(enabled: bool): void { root.setShuffle(enabled) }
+    function cycleRepeat(): void { root.cycleRepeat() }
+    function setAutoplay(enabled: bool): void { root.setAutoplay(enabled) }
+    function addToLibrary(): void { root.addToLibrary() }
     function jumpTo(index: int): void { root.jumpToQueueIndex(index) }
   }
 }

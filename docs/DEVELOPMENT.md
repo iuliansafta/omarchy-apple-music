@@ -85,6 +85,20 @@ The service considers a duration valid only when it is positive and shorter than
 
 For affected HLS tracks, the underlying `<audio>` element reports `Infinity`, which Chromium converts to `INT64_MAX`. `extension/duration-bridge.js` runs in the Apple Music page's main world, matches Chromium's current Media Session title/artist against MusicKit's queue, reads the matched item's `attributes.durationInMillis`, and republishes it with `navigator.mediaSession.setPositionState()`. Matching matters because MusicKit's `currentItem` can briefly remain on the previous track; publishing that stale duration pins progress at the wrong endpoint. The bridge does nothing when the media element already has a finite duration. It requires no extension permissions and matches only `https://music.apple.com/*`.
 
+## Bridge reconnection
+
+`scripts/bridge-daemon` keeps trying to recover on its own; there is no need to restart the shell after the dedicated browser closes or its page target is replaced:
+
+- On any CDP session error the daemon closes the dead WebSocket, emits `{"ok": false}` for that poll cycle, and re-reads `DevToolsActivePort` plus `/json/list` on the next poll (1s), so both full browser restarts and in-place page-target replacement (reload/navigation) recover automatically.
+- Pending command files under `bridge-commands/` survive the disconnect and are retried on the new session, up to `MAX_COMMAND_ATTEMPTS` (3). A command whose page execution succeeded is deleted immediately and never re-applied; the retry cap bounds re-execution when the response is lost mid-flight.
+- Diagnostics go to stderr only (one JSON state object per line on stdout), and a disconnect logs one `session dropped` line, not a stream of dead-socket errors.
+
+To watch a reconnect live (one `session dropped` line, then recovery):
+
+```bash
+journalctl --user -f | grep -Ei 'apple-music|bridge-daemon'
+```
+
 ## Launcher
 
 ```bash

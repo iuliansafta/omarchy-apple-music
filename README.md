@@ -9,13 +9,19 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 ## Features
 
 - Dedicated Chromium app/profile for reliable Apple Music detection
-- Hides itself from the bar when Apple Music is not running
+- Compact, fixed-width album-art button that keeps the bar layout stable
+- Theme-colored vector Apple Music fallback when artwork is unavailable
+- Optional legacy text label for visible title and artist metadata
+- Always-available bar button that launches Apple Music when closed
 - Launch or focus Apple Music from the bar
 - Track title, artist, album, and artwork
 - Previous, play/pause, and next controls
 - Like and dislike for the current song, synced to the Apple Music library
 - Up-next queue with click-to-jump
-- Recently played history
+- Recently played history, persisted across shell and machine restarts
+- Shuffle, repeat (off/all/one), and autoplay controls, synced with Apple Music
+- Recently played entries replay the exact song (old entries keep working)
+- Add the current song to the Apple Music library, with truthful state
 - Player panel with a blurred artwork backdrop
 
 ## Requirements
@@ -41,15 +47,12 @@ omarchy plugin enable iuliansafta.apple-music center
 
 ### First launch and sign-in
 
-The widget is hidden on a fresh install, so start the web app once. Any of these work:
+The compact Apple Music button is always available in the bar. Click it to launch the web app, or use either command:
 
 ```bash
-# Click the Apple Music widget in the bar (once it is visible)
 ~/.config/omarchy/plugins/iuliansafta.apple-music/scripts/apple-music open
 omarchy-shell iuliansafta.apple-music open
 ```
-
-After the window opens the widget appears automatically (within a couple of seconds). To keep the widget reserved in the bar even when Apple Music is closed, set `hideWhenNotRunning` to `false` in the widget's shell.json entry or via Omarchy's settings UI.
 
 Sign in inside the opened window with your Apple ID (two-factor authentication works as usual — the confirmation code prompt appears in the same window). Credentials are stored in the plugin's isolated Chromium profile at `~/.local/share/omarchy-apple-music/chromium-profile`, so you stay signed in across restarts and the login never touches your normal browser profile. Without an active Apple Music subscription you can browse the library, but playback is limited to previews.
 
@@ -63,6 +66,7 @@ To also start Apple Music from the application launcher (SUPER + SPACE), either 
 
 Or create a web app the generic Omarchy way, pointing its `custom-exec` at the plugin's launcher so the extension and the bridge daemon still load:
 
+```bash
 omarchy webapp install "Apple Music" https://music.apple.com \
   "$HOME/.config/omarchy/plugins/iuliansafta.apple-music/assets/apple-music.svg" \
   "$HOME/.config/omarchy/plugins/iuliansafta.apple-music/scripts/apple-music open"
@@ -74,10 +78,14 @@ A plain `omarchy webapp install "Apple Music" https://music.apple.com apple-musi
 
 ## Controls
 
+The default bar display is a fixed-width album-art button. Hover it for the full track title and artist; long track names never resize the bar slot. Select `Text` under the widget's **Bar display** setting to restore the Apple icon and text label.
+
 - Click while closed: launch/focus Apple Music
 - Click while connected: open the player panel
 - Middle-click: play/pause
 - Scroll up/down: previous/next
+
+The player panel keeps previous/play/next as the primary controls and places ratings, library, shuffle, repeat, and autoplay in one compact secondary row.
 
 ## Progress handling
 
@@ -88,6 +96,20 @@ The plugin bundles a minimal extension, restricted to `https://music.apple.com/*
 ## Ratings and queue
 
 Chromium's Media Session cannot carry ratings or queue contents, so those travel a different path: the bundled extension also exposes a `collect`/`command` hook on the page, and a small daemon (`scripts/bridge-daemon`, spawned by the plugin service) relays it over Chromium's DevTools protocol — which the dedicated browser enables with `--remote-debugging-port=0` on a localhost-only port. Ratings are read and written through Apple Music's own ratings API with the tokens MusicKit already holds in the page. If Apple Music Web changes its internals, rating and queue features degrade to hidden while duration bridging and playback controls keep working.
+
+## Playback modes
+
+The player panel has a shuffle / repeat / autoplay row next to the rating controls. All three are read from and written through MusicKit on the Apple Music page (the single source of truth — Chromium's Media Session cannot carry them, and MPRIS has no autoplay concept), so the controls always show the state Apple Music itself reports, including changes made inside Apple Music. Repeat cycles Off → Repeat All → Repeat One → Off. When the bridge is unavailable the row hides and ordinary MPRIS transport keeps working.
+
+Autoplay means Apple Music's infinite continuation of the queue (recommended tracks after your queue ends), not automatic application launch.
+
+## Recently played
+
+Recently played entries persist across shell and machine restarts in `~/.local/share/omarchy-apple-music/history.jsonl`. The visible list keeps each title/artist pair once; replaying a song moves its newest occurrence to the top instead of adding a duplicate row. New entries recorded while the bridge is active carry an exact-song descriptor (catalog/library song IDs from MusicKit); clicking such an entry replaces Apple Music's current playback with that exact song — never a title/artist guess — and lets Apple Music establish its normal continuation. Entries recorded before this feature (or while the bridge was unavailable) remain listed but only focus Apple Music when clicked.
+
+## Add to library
+
+The library button next to the rating controls adds the currently audible song to your Apple Music library. It is a distinct action from like/dislike: membership is read from Apple's own library API (matched by exact catalog ID, never by title), and the button only offers an add when Apple reports the song as absent. Pending adds show a waiting state and cannot trigger duplicate writes; the check mark appears only once Apple's library actually reflects the song. Failure and unknown states stay non-committal instead of claiming success. Removal is not offered — Apple's web API does not allow it from the browser.
 
 ## Remove
 
