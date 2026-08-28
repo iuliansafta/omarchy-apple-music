@@ -555,11 +555,6 @@ BarWidget {
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
-            Accessible.role: Accessible.ListItem
-            Accessible.name: historyRow.modelData.title +
-              (historyRow.modelData.artist ? " — " + historyRow.modelData.artist : "") +
-              (historyRow.modelData.play ? ", replay" : ", open Apple Music")
-
             MouseArea {
               anchors.fill: parent
               // Replayable rows carry an exact-song descriptor; legacy rows
