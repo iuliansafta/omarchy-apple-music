@@ -153,7 +153,7 @@ Item {
       // non-replayable) while the bridge is not actively matching MPRIS.
       play: bridgeActive && bridgeState && bridgeState.play ? bridgeState.play : null
     }
-    recentTracks = [entry].concat(recentTracks).slice(0, recentCap)
+    recentTracks = Model.uniqueHistoryEntries([entry].concat(recentTracks), recentCap)
     historyAppendProc.command = [
       "bash", "-c", Model.historyAppendBashScript(), "sh",
       JSON.stringify(entry), historyPath
@@ -172,23 +172,11 @@ Item {
   // unreadable file yields empty output and an empty history — never a
   // per-poll warning. Text → entries stays in Model.parseHistoryLines.
   function loadHistoryFinished(text) {
-    var merged = []
-    var seen = {}
-    // Newest first. In-memory entries (appended while the read was in
-    // flight, or since startup) win; dedupe key is the exact playback
-    // occurrence (timestamp + title), so repeated plays stay distinct.
-    var sources = [recentTracks, Model.parseHistoryLines(text, recentCap)]
-    for (var s = 0; s < sources.length; s++) {
-      for (var i = 0; i < sources[s].length; i++) {
-        var entry = sources[s][i]
-        var key = entry.ts + "|" + entry.title
-        if (!seen[key]) {
-          seen[key] = true
-          merged.push(entry)
-        }
-      }
-    }
-    recentTracks = merged.slice(0, recentCap)
+    // Newest in-memory entries (created while the startup read was in
+    // flight) win. The model then keeps only the latest occurrence of each
+    // song, including legacy records without a playback descriptor.
+    recentTracks = Model.uniqueHistoryEntries(
+      recentTracks.concat(Model.parseHistoryLines(text, 0)), recentCap)
     historyLoaded = true
   }
 
@@ -221,7 +209,14 @@ Item {
   // before the entry is written, and lastHistoryKey collapses the result.
   onTitleChanged: historyLogTimer.restart()
 
-  onRawArtUrlChanged: artSettleTimer.restart()
+  onRawArtUrlChanged: {
+    if (rawArtUrl === "") {
+      artSettleTimer.stop()
+      artUrl = ""
+    } else {
+      artSettleTimer.restart()
+    }
+  }
 
   Timer {
     id: artSettleTimer

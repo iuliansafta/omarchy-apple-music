@@ -23,34 +23,36 @@
     "allowMultiple": false,
     "defaultSection": "center",
     "defaults": {
+      "barDisplay": "Artwork",
       "showArtist": true,
       "maxLabelWidth": 220,
-      "hideWhenNotRunning": true,
       "showQueue": true,
       "showPlaybackModes": true,
       "showRecentlyPlayed": true
     },
     "schema": [
       {
+        "key": "barDisplay",
+        "type": "enum",
+        "label": "Bar display",
+        "options": ["Artwork", "Text"],
+        "defaultValue": "Artwork",
+        "description": "Show a compact album-art button or the legacy Apple Music text label."
+      },
+      {
         "key": "showArtist",
         "type": "boolean",
-        "label": "Show artist",
+        "label": "Show artist in Text mode",
         "defaultValue": true
       },
       {
         "key": "maxLabelWidth",
         "type": "integer",
-        "label": "Maximum label width",
+        "label": "Text mode maximum width",
         "min": 100,
         "max": 500,
         "step": 20,
         "defaultValue": 220
-      },
-      {
-        "key": "hideWhenNotRunning",
-        "type": "boolean",
-        "label": "Hide when Apple Music is not running",
-        "defaultValue": true
       },
       {
         "key": "showQueue",

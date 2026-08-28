@@ -43,14 +43,30 @@ assert.equal(history[0].title, "C")
 assert.equal(history[1].title, "B")
 assert.equal(history[1].album, "Album")
 assert.equal(model.parseHistoryLines("", 10).length, 0)
-// Repeated plays of the same song are distinct records when they carry
-// distinct timestamps; startup loading must not collapse them.
+// Recently played is unique by normalized title/artist. The newest play wins,
+// including for legacy entries that do not carry a playback descriptor.
 const repeats = model.parseHistoryLines([
   JSON.stringify({ ts: 10, title: "A", artist: "X" }),
-  JSON.stringify({ ts: 20, title: "A", artist: "X" })
+  JSON.stringify({ ts: 15, title: "B", artist: "Y" }),
+  JSON.stringify({ ts: 20, title: " a ", artist: "x" })
 ].join("\n"), 10)
 assert.equal(repeats.length, 2)
 assert.equal(repeats[0].ts, 20)
+assert.equal(repeats[1].title, "B")
+// The cap counts unique songs, so duplicate lines do not hide older distinct
+// entries that still fit in the visible list.
+const cappedUnique = model.parseHistoryLines([
+  JSON.stringify({ ts: 1, title: "Older", artist: "Artist" }),
+  JSON.stringify({ ts: 2, title: "Repeat", artist: "Artist" }),
+  JSON.stringify({ ts: 3, title: "Repeat", artist: "Artist" })
+].join("\n"), 2)
+assert.deepEqual(cappedUnique.map(entry => entry.title), ["Repeat", "Older"])
+const movedToTop = model.uniqueHistoryEntries([
+  { ts: 4, title: "Older", artist: "Artist" },
+  { ts: 3, title: "Repeat", artist: "Artist" },
+  { ts: 1, title: "Older", artist: "Artist" }
+], 10)
+assert.deepEqual(movedToTop.map(entry => entry.ts), [4, 3])
 // Legacy entries with missing optional fields stay readable.
 const legacy = model.parseHistoryLines(JSON.stringify({ ts: 5, title: "Old" }), 5)
 assert.equal(legacy.length, 1)
