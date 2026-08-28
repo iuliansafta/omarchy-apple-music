@@ -17,6 +17,11 @@ Item {
   property var recentTracks: []
   property string lastHistoryKey: ""
   property int commandSequence: 0
+  // False until the persisted history file has been read once at startup;
+  // the merge in loadHistoryFinished() keeps entries appended in the
+  // meantime instead of letting the slower read overwrite them.
+  property bool historyLoaded: false
+  readonly property int recentCap: 30
 
   readonly property string dataRoot:
     (Quickshell.env("XDG_DATA_HOME") || Quickshell.env("HOME") + "/.local/share") + "/omarchy-apple-music"
@@ -112,12 +117,36 @@ Item {
     var entry = {
       ts: Date.now(), title: title, artist: artist, album: album, art: artUrl
     }
-    recentTracks = [entry].concat(recentTracks).slice(0, 30)
+    recentTracks = [entry].concat(recentTracks).slice(0, recentCap)
     historyAppendProc.command = [
       "bash", "-c", Model.historyAppendBashScript(), "sh",
       JSON.stringify(entry), historyPath
     ]
     historyAppendProc.running = true
+  }
+
+  // One-shot load of history.jsonl at service startup. A missing, empty, or
+  // unreadable file yields empty output and an empty history — never a
+  // per-poll warning. Text → entries stays in Model.parseHistoryLines.
+  function loadHistoryFinished(text) {
+    var merged = []
+    var seen = {}
+    // Newest first. In-memory entries (appended while the read was in
+    // flight, or since startup) win; dedupe key is the exact playback
+    // occurrence (timestamp + title), so repeated plays stay distinct.
+    var sources = [recentTracks, Model.parseHistoryLines(text, recentCap)]
+    for (var s = 0; s < sources.length; s++) {
+      for (var i = 0; i < sources[s].length; i++) {
+        var entry = sources[s][i]
+        var key = entry.ts + "|" + entry.title
+        if (!seen[key]) {
+          seen[key] = true
+          merged.push(entry)
+        }
+      }
+    }
+    recentTracks = merged.slice(0, recentCap)
+    historyLoaded = true
   }
 
   function togglePlayback() {
@@ -219,11 +248,19 @@ Item {
       }
     }
   }
+  Process {
+    id: historyLoadProc
+    command: ["bash", "-c", 'cat "$1" 2>/dev/null || true', "sh", root.historyPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadHistoryFinished(String(text || ""))
+    }
+  }
+
+  Component.onCompleted: historyLoadProc.running = true
 
   Process { id: bridgeCommandProc }
-
   Process { id: historyAppendProc }
-
   IpcHandler {
     target: "iuliansafta.apple-music"
 

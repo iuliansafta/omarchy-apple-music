@@ -43,6 +43,20 @@ assert.equal(history[0].title, "C")
 assert.equal(history[1].title, "B")
 assert.equal(history[1].album, "Album")
 assert.equal(model.parseHistoryLines("", 10).length, 0)
+// Repeated plays of the same song are distinct records when they carry
+// distinct timestamps; startup loading must not collapse them.
+const repeats = model.parseHistoryLines([
+  JSON.stringify({ ts: 10, title: "A", artist: "X" }),
+  JSON.stringify({ ts: 20, title: "A", artist: "X" })
+].join("\n"), 10)
+assert.equal(repeats.length, 2)
+assert.equal(repeats[0].ts, 20)
+// Legacy entries with missing optional fields stay readable.
+const legacy = model.parseHistoryLines(JSON.stringify({ ts: 5, title: "Old" }), 5)
+assert.equal(legacy.length, 1)
+assert.equal(legacy[0].artist, "")
+assert.equal(legacy[0].album, "")
+assert.equal(legacy[0].art, "")
 
 // The append script keeps the file bounded without leaving a torn line.
 const script = model.historyAppendBashScript()

@@ -15,7 +15,7 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 - Previous, play/pause, and next controls
 - Like and dislike for the current song, synced to the Apple Music library
 - Up-next queue with click-to-jump
-- Recently played history
+- Recently played history, persisted across shell and machine restarts
 - Player panel with a blurred artwork backdrop
 
 ## Requirements
