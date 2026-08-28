@@ -10,10 +10,10 @@ Run all four; all must pass:
 omarchy plugin validate .          # manifest + plugin structure
 bash -n scripts/apple-music        # launcher script syntax
 node tests/model.test.js           # AppleMusicModel.js pure logic
-node tests/duration-bridge.test.js # extension/duration-bridge.js pure logic
+node tests/duration-bridge.test.js # extension/chromium/duration-bridge.js pure logic
 ```
 
-Tests are plain `node:test`/`assert` scripts — no runner config. Add a new pure function to `AppleMusicModel.js` or `extension/duration-bridge.js`? Add assertions to the matching test file.
+Tests are plain `node:test`/`assert` scripts — no runner config. Add a new pure function to `AppleMusicModel.js` or `extension/chromium/duration-bridge.js`? Add assertions to the matching test file.
 
 ## Dev setup & reload
 
@@ -40,7 +40,7 @@ journalctl --user --since "2 minutes ago" | grep -Ei 'apple-music|qml.*(error|wa
 
 ## Architecture that is not obvious from filenames
 
-- `AppleMusicWidget.qml` (bar widget) → `AppleMusicService.qml` (service) → Quickshell `Mpris` → dedicated Chromium app → `extension/duration-bridge.js` (injected into `music.apple.com`).
+- `AppleMusicWidget.qml` (bar widget) → `AppleMusicService.qml` (service) → Quickshell `Mpris` → dedicated Chromium app → `extension/chromium/duration-bridge.js` (injected into `music.apple.com`).
 - The service selects the MPRIS player whose D-Bus name ends in `.instance<PID>` where PID matches the dedicated Hyprland window. **It never falls back to the first Chromium player** — a normal YouTube tab must not be mistaken for Apple Music. Preserve this when editing `Model.selectPlayer`.
 - `Mpris.players.values` is a QML sequence, not a JS `Array`. `Array.isArray()` is unreliable on it; `Model.selectPlayer` iterates by index. Don't "fix" it to use array methods.
 - The Chromium profile is isolated at `~/.local/share/omarchy-apple-music/chromium-profile`, separate from the user's normal Chromium. `playerctl` is not required.
@@ -55,7 +55,7 @@ journalctl --user --since "2 minutes ago" | grep -Ei 'apple-music|qml.*(error|wa
 
 ## HLS duration bridge gotcha
 
-Some Apple Music HLS tracks report `Infinity` as the `<audio>` duration; Chromium converts that to `INT64_MAX` over MPRIS. `extension/duration-bridge.js` runs in the page main world on `https://music.apple.com/*`, matches Chromium's current Media Session title/artist against MusicKit's queue, and republishes `attributes.durationInMillis` via `navigator.mediaSession.setPositionState()`. Matching matters because `MusicKit.currentItem` can lag a track change — never publish a stale previous track's duration. `Model.validLength` rejects durations ≥ 24h as a safety fallback.
+Some Apple Music HLS tracks report `Infinity` as the `<audio>` duration; Chromium converts that to `INT64_MAX` over MPRIS. `extension/chromium/duration-bridge.js` runs in the page main world on `https://music.apple.com/*`, matches Chromium's current Media Session title/artist against MusicKit's queue, and republishes `attributes.durationInMillis` via `navigator.mediaSession.setPositionState()`. Matching matters because `MusicKit.currentItem` can lag a track change — never publish a stale previous track's duration. `Model.validLength` rejects durations ≥ 24h as a safety fallback.
 
 ## Release
 

@@ -12,7 +12,7 @@ AppleMusicService.qml ── Quickshell.Services.Mpris
 scripts/apple-music ── dedicated Chromium app/profile
         │
         ▼
-extension/duration-bridge.js ── MusicKit → Media Session duration
+extension/chromium/duration-bridge.js ── MusicKit → Media Session duration
 ```
 
 The service selects only the Chromium MPRIS name whose `.instance<PID>` suffix matches the PID of the dedicated Hyprland window. It never falls back to the first Chromium player, preventing a normal YouTube tab from being mistaken for Apple Music.
@@ -83,7 +83,7 @@ busctl --user get-property \
 
 The service considers a duration valid only when it is positive and shorter than 24 hours. This filters Chromium's `INT64_MAX` duration while preserving normal tracks and long-form audio.
 
-For affected HLS tracks, the underlying `<audio>` element reports `Infinity`, which Chromium converts to `INT64_MAX`. `extension/duration-bridge.js` runs in the Apple Music page's main world, matches Chromium's current Media Session title/artist against MusicKit's queue, reads the matched item's `attributes.durationInMillis`, and republishes it with `navigator.mediaSession.setPositionState()`. Matching matters because MusicKit's `currentItem` can briefly remain on the previous track; publishing that stale duration pins progress at the wrong endpoint. The bridge does nothing when the media element already has a finite duration. It requires no extension permissions and matches only `https://music.apple.com/*`.
+For affected HLS tracks, the underlying `<audio>` element reports `Infinity`, which Chromium converts to `INT64_MAX`. `extension/chromium/duration-bridge.js` runs in the Apple Music page's main world, matches Chromium's current Media Session title/artist against MusicKit's queue, reads the matched item's `attributes.durationInMillis`, and republishes it with `navigator.mediaSession.setPositionState()`. Matching matters because MusicKit's `currentItem` can briefly remain on the previous track; publishing that stale duration pins progress at the wrong endpoint. The bridge does nothing when the media element already has a finite duration. It requires no extension permissions and matches only `https://music.apple.com/*`.
 
 ## Bridge reconnection
 

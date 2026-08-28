@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict")
-const bridge = require("../extension/duration-bridge.js")
+const bridge = require("../extension/chromium/duration-bridge.js")
 
 assert.equal(
   bridge.appleMusicDurationSeconds({ attributes: { durationInMillis: 222551 } }),
