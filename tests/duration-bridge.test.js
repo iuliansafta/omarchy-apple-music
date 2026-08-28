@@ -167,4 +167,66 @@ assert.equal(modeState.repeat, "all")
 assert.equal(modeState.autoplay, null)
 
 delete global.window
+
+// ---- Replay descriptors ----
+
+const catalogItem = {
+  attributes: { name: "Dreams", playParams: { id: "594061856", kind: "song" } }
+}
+const libraryItem = {
+  attributes: { name: "A Place for My Head", playParams: {
+    id: "i.VNKLFZ7NoWV", kind: "song", isLibrary: true, catalogId: "590431786" } }
+}
+
+assert.deepEqual(bridge.playbackDescriptorOf(catalogItem), { kind: "song", id: "594061856" })
+assert.deepEqual(bridge.playbackDescriptorOf(libraryItem), {
+  kind: "song", id: "i.VNKLFZ7NoWV", catalogId: "590431786"
+})
+assert.equal(bridge.playbackDescriptorOf({ attributes: {} }), null)
+assert.equal(bridge.playbackDescriptorOf(null), null)
+assert.equal(bridge.playbackDescriptorOf({ attributes: { playParams: { id: "bad id!" } } }), null)
+
+// Command validation: incomplete or malformed descriptors never reach the
+// player, and unknown fields are dropped.
+assert.deepEqual(bridge.validPlaybackDescriptor({ kind: "song", id: "594061856" }), {
+  kind: "song", id: "594061856"
+})
+assert.deepEqual(bridge.validPlaybackDescriptor({ id: "i.abc", catalogId: "42" }), {
+  kind: "song", id: "i.abc", catalogId: "42"
+})
+assert.equal(bridge.validPlaybackDescriptor(null), null)
+assert.equal(bridge.validPlaybackDescriptor("594061856"), null)
+assert.equal(bridge.validPlaybackDescriptor({}), null)
+assert.equal(bridge.validPlaybackDescriptor({ id: "" }), null)
+assert.equal(bridge.validPlaybackDescriptor({ id: "594 061856" }), null)
+assert.equal(bridge.validPlaybackDescriptor({ id: "1", kind: "albums" }), null)
+assert.equal(bridge.validPlaybackDescriptor({ id: "1", catalogId: "no good" }), null)
+
+// playDescriptor replaces playback with the exact song: catalog twin wins for
+// library items, and a failing setQueue surfaces as a safe error.
+const queueStub = { setQueueCalls: [], setQueue: function(options) {
+  queueStub.setQueueCalls.push(options)
+  return Promise.resolve()
+} }
+bridge.playDescriptor(queueStub, { kind: "song", id: "i.abc", catalogId: "590431786" })
+assert.deepEqual(queueStub.setQueueCalls[0], { songs: ["590431786"], startPlaying: true })
+bridge.playDescriptor(queueStub, { kind: "song", id: "594061856" })
+assert.deepEqual(queueStub.setQueueCalls[1], { songs: ["594061856"], startPlaying: true })
+
+// handleCommand play-descriptor: rejects malformed payloads without touching
+// the queue, and applies valid ones through setQueue.
+const playStub = { setQueueCalls: [], setQueue: function(options) {
+  playStub.setQueueCalls.push(options)
+  return Promise.resolve()
+} }
+global.window = { MusicKit: { getInstance: function() { return playStub } } }
+bridge.handleCommand({ action: "play-descriptor", descriptor: { id: "bad id" } })
+assert.equal(playStub.setQueueCalls.length, 0)
+bridge.handleCommand({ action: "play-descriptor", descriptor: { id: "i.abc", catalogId: "42" } })
+assert.deepEqual(playStub.setQueueCalls[0], { songs: ["42"], startPlaying: true })
+// A MusicKit without setQueue cannot replay; the safe error path is returned
+// asynchronously (the call itself never throws).
+bridge.playDescriptor({}, { kind: "song", id: "1" })
+delete global.window
+
 console.log("duration bridge tests passed")

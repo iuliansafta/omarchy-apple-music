@@ -142,7 +142,10 @@ Item {
     if (key === lastHistoryKey) return
     lastHistoryKey = key
     var entry = {
-      ts: Date.now(), title: title, artist: artist, album: album, art: artUrl
+      ts: Date.now(), title: title, artist: artist, album: album, art: artUrl,
+      // Exact-song descriptor from the matched MusicKit item; null (kept
+      // non-replayable) while the bridge is not actively matching MPRIS.
+      play: bridgeActive && bridgeState && bridgeState.play ? bridgeState.play : null
     }
     recentTracks = [entry].concat(recentTracks).slice(0, recentCap)
     historyAppendProc.command = [
@@ -150,6 +153,13 @@ Item {
       JSON.stringify(entry), historyPath
     ]
     historyAppendProc.running = true
+  }
+
+  // Replays an exact song from a history record via the bridge. Old records
+  // without a descriptor stay passive (the widget focuses Apple Music).
+  function replayTrack(entry) {
+    if (!bridgeActive || !entry || !entry.play) return
+    sendBridgeCommand({ action: "play-descriptor", descriptor: entry.play })
   }
 
   // One-shot load of history.jsonl at service startup. A missing, empty, or

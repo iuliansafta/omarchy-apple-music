@@ -17,6 +17,7 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 - Up-next queue with click-to-jump
 - Recently played history, persisted across shell and machine restarts
 - Shuffle, repeat (off/all/one), and autoplay controls, synced with Apple Music
+- Recently played entries replay the exact song (old entries keep working)
 - Player panel with a blurred artwork backdrop
 
 ## Requirements
@@ -95,6 +96,10 @@ Chromium's Media Session cannot carry ratings or queue contents, so those travel
 The player panel has a shuffle / repeat / autoplay row next to the rating controls. All three are read from and written through MusicKit on the Apple Music page (the single source of truth — Chromium's Media Session cannot carry them, and MPRIS has no autoplay concept), so the controls always show the state Apple Music itself reports, including changes made inside Apple Music. Repeat cycles Off → Repeat All → Repeat One → Off. When the bridge is unavailable the row hides and ordinary MPRIS transport keeps working.
 
 Autoplay means Apple Music's infinite continuation of the queue (recommended tracks after your queue ends), not automatic application launch.
+
+## Recently played
+
+Recently played entries persist across shell and machine restarts in `~/.local/share/omarchy-apple-music/history.jsonl`. New entries recorded while the bridge is active carry an exact-song descriptor (catalog/library song IDs from MusicKit); clicking such an entry replaces Apple Music's current playback with that exact song — never a title/artist guess — and lets Apple Music establish its normal continuation. Entries recorded before this feature (or while the bridge was unavailable) remain listed but only focus Apple Music when clicked.
 
 ## Remove
 

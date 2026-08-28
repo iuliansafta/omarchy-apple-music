@@ -58,6 +58,27 @@ assert.equal(legacy[0].artist, "")
 assert.equal(legacy[0].album, "")
 assert.equal(legacy[0].art, "")
 
+// History entries may carry a playback descriptor; malformed ones parse as
+// null so the row stays readable but non-replayable.
+const withPlay = model.parseHistoryLines([
+  JSON.stringify({ ts: 30, title: "Dreams", artist: "Fleetwood Mac",
+    play: { kind: "song", id: "594061856" } }),
+  JSON.stringify({ ts: 31, title: "Lib", play: {
+    kind: "song", id: "i.abc", catalogId: "42" } }),
+  JSON.stringify({ ts: 32, title: "Broken", play: { kind: "song", id: "" } }),
+  JSON.stringify({ ts: 33, title: "WrongKind", play: { kind: "albums", id: "1" } }),
+  JSON.stringify({ ts: 34, title: "Junk", play: "594061856" }),
+  JSON.stringify({ ts: 35, title: "Legacy" })
+].join("\n"), 10)
+assert.equal(withPlay.length, 6)
+assert.deepEqual(withPlay[5].play, { kind: "song", id: "594061856" })
+assert.deepEqual(withPlay[4].play, { kind: "song", id: "i.abc", catalogId: "42" })
+assert.equal(withPlay[3].play, null)
+assert.equal(withPlay[2].play, null)
+assert.equal(withPlay[1].play, null)
+assert.equal(withPlay[0].play, null)
+assert.equal(model.historyPlaybackDescriptor({ id: "1", extra: "x" }).extra, undefined)
+
 // The append script keeps the file bounded without leaving a torn line.
 const script = model.historyAppendBashScript()
 assert.ok(script.includes("printf"))

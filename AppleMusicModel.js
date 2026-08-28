@@ -52,6 +52,23 @@ function upNextFromState(state) {
   return state && Array.isArray(state.upNext) ? state.upNext : []
 }
 
+// History records may carry a "play" descriptor identifying the exact song,
+// same shape the extension produces: { kind: "song", id, catalogId? }.
+// Malformed or missing descriptors parse as null, keeping legacy records
+// readable but non-replayable.
+function historyPlaybackDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  var id = typeof value.id === "string" ? value.id : ""
+  if (!id || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return null
+  if (typeof value.kind !== "undefined" && value.kind !== "song") return null
+  var descriptor = { kind: "song", id: id }
+  if (typeof value.catalogId === "string" && value.catalogId !== "") {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.catalogId)) return null
+    descriptor.catalogId = value.catalogId
+  }
+  return descriptor
+}
+
 function historyLogKey(title, artist) {
   return String(title || "").trim().toLowerCase() + "|" + String(artist || "").trim().toLowerCase()
 }
@@ -71,7 +88,8 @@ function parseHistoryLines(text, cap) {
           title: String(entry.title),
           artist: String(entry.artist || ""),
           album: String(entry.album || ""),
-          art: String(entry.art || "")
+          art: String(entry.art || ""),
+          play: historyPlaybackDescriptor(entry.play)
         })
       }
     } catch (_) {
@@ -99,6 +117,7 @@ if (typeof module !== "undefined") {
     bridgeIsActive: bridgeIsActive,
     upNextFromState: upNextFromState,
     historyLogKey: historyLogKey,
+    historyPlaybackDescriptor: historyPlaybackDescriptor,
     parseHistoryLines: parseHistoryLines,
     historyAppendBashScript: historyAppendBashScript
   }

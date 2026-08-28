@@ -134,6 +134,57 @@ function normalizeAutoplay(value) {
   return typeof value === "boolean" ? value : null
 }
 
+
+// ---------------------------------------------------------------------------
+// Replay descriptors: stable primitive fields identifying the current MusicKit
+// item, stored in history records and round-tripped through the play command.
+// Verified against the live web player (MusicKit JS 3.2632.1):
+// setQueue({songs:[id], startPlaying:true}) accepts catalog ids and library
+// "i." ids; library items carry attributes.playParams.catalogId pointing at
+// the catalog twin, which is preferred for replay (catalog playback gives
+// full-quality streaming and normal continuation behavior).
+var DESCRIPTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+function playbackDescriptorOf(item) {
+  var params = playParamsOf(item)
+  var id = params && params.id ? String(params.id) : ""
+  if (!id || !DESCRIPTOR_ID_PATTERN.test(id)) return null
+  var descriptor = { kind: "song", id: id }
+  var catalogId = params.catalogId ? String(params.catalogId) : ""
+  if (catalogId && DESCRIPTOR_ID_PATTERN.test(catalogId)) {
+    descriptor.catalogId = catalogId
+  }
+  return descriptor
+}
+
+// Command-boundary validation: only fully-formed descriptors reach the
+// player, and unknown fields are dropped rather than passed through.
+function validPlaybackDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  var id = typeof value.id === "string" ? value.id : ""
+  if (!id || !DESCRIPTOR_ID_PATTERN.test(id)) return null
+  if (typeof value.kind !== "undefined" && value.kind !== "song") return null
+  var descriptor = { kind: "song", id: id }
+  var catalogId = typeof value.catalogId === "string" ? value.catalogId : ""
+  if (catalogId) {
+    if (!DESCRIPTOR_ID_PATTERN.test(catalogId)) return null
+    descriptor.catalogId = catalogId
+  }
+  return descriptor
+}
+
+// Replaces playback with the exact song (never title/artist matching) and
+// lets Apple Music establish its normal continuation behavior.
+function playDescriptor(music, descriptor) {
+  if (typeof music.setQueue !== "function") {
+    return Promise.resolve({ ok: false, error: "no-queue-api" })
+  }
+  var songId = descriptor.catalogId || descriptor.id
+  return music.setQueue({ songs: [songId], startPlaying: true })
+    .then(function() { return { ok: true } })
+    .catch(function() { return { ok: false, error: "play-failed" } })
+}
+
 function normalizeQueueEntry(item, index) {
   var attributes = item && item.attributes
   if (!attributes || !attributes.name) return null
@@ -274,7 +325,8 @@ function collectBridgeState() {
       upNext: context ? upNextEntries(context.items, position, 20) : [],
       shuffle: normalizeShuffle(music.shuffleMode),
       repeat: normalizeRepeat(music.repeatMode),
-      autoplay: normalizeAutoplay(music.autoplayEnabled)
+      autoplay: normalizeAutoplay(music.autoplayEnabled),
+      play: current ? playbackDescriptorOf(current) : null
     }
   } catch (_) {
     return { ok: false }
@@ -373,6 +425,12 @@ function handleCommand(payload) {
       music.autoplayEnabled = payload.enabled
       return Promise.resolve({ ok: true })
     }
+
+    if (action === "play-descriptor") {
+      var descriptor = validPlaybackDescriptor(payload.descriptor)
+      if (!descriptor) return Promise.resolve({ ok: false, error: "bad-descriptor" })
+      return playDescriptor(music, descriptor)
+    }
     return Promise.resolve({ ok: false, error: "unknown-action" })
   } catch (_) {
     return Promise.resolve({ ok: false, error: "exception" })
@@ -402,6 +460,9 @@ if (typeof module !== "undefined") {
     playableId: playableId,
     ratingKind: ratingKind,
     ratingStateForValue: ratingStateForValue,
+    playbackDescriptorOf: playbackDescriptorOf,
+    validPlaybackDescriptor: validPlaybackDescriptor,
+    playDescriptor: playDescriptor,
     normalizeShuffle: normalizeShuffle,
     normalizeRepeat: normalizeRepeat,
     normalizeAutoplay: normalizeAutoplay,

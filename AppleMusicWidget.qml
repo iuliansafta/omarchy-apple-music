@@ -512,6 +512,11 @@ BarWidget {
             width: parent.width
             height: historyLabel.implicitHeight + Style.space(4)
 
+            Accessible.role: Accessible.ListItem
+            Accessible.name: historyRow.modelData.title +
+              (historyRow.modelData.artist ? " — " + historyRow.modelData.artist : "") +
+              (historyRow.modelData.play ? ", replay" : ", open Apple Music")
+
             Text {
               id: historyLabel
               anchors.verticalCenter: parent.verticalCenter
@@ -523,11 +528,21 @@ BarWidget {
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
+            Accessible.role: Accessible.ListItem
+            Accessible.name: historyRow.modelData.title +
+              (historyRow.modelData.artist ? " — " + historyRow.modelData.artist : "") +
+              (historyRow.modelData.play ? ", replay" : ", open Apple Music")
 
             MouseArea {
               anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: if (root.music) root.music.openAppleMusic()
+              // Replayable rows carry an exact-song descriptor; legacy rows
+              // keep the pre-existing focus behavior and must not imply replay.
+              cursorShape: historyRow.modelData.play
+                ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onClicked: if (root.music) {
+                if (historyRow.modelData.play) root.music.replayTrack(historyRow.modelData)
+                else root.music.openAppleMusic()
+              }
             }
           }
         }
