@@ -229,4 +229,185 @@ assert.deepEqual(playStub.setQueueCalls[0], { songs: ["42"], startPlaying: true 
 bridge.playDescriptor({}, { kind: "song", id: "1" })
 delete global.window
 
-console.log("duration bridge tests passed")
+// ---- Library membership / add-to-library (mocked fetch, never live) ----
+
+const CATALOG_ID = "6000001"
+const catalogSong = {
+  attributes: { name: "Some Song", playParams: { id: CATALOG_ID, kind: "song" } }
+}
+const librarySong = {
+  attributes: { name: "Owned Song", playParams: {
+    id: "i.owned", kind: "song", isLibrary: true, catalogId: "6000002" } }
+}
+const musicStub = { developerToken: "dev", musicUserToken: "user" }
+
+assert.equal(bridge.librarySearchUrl(catalogSong),
+  "https://api.music.apple.com/v1/me/library/search?term=Some%20Song&types=library-songs&limit=10")
+assert.equal(bridge.libraryAddUrl(catalogSong),
+  "https://api.music.apple.com/v1/me/library?ids%5Bsongs%5D=6000001")
+assert.equal(bridge.libraryHits({
+  results: { "library-songs": { data: [
+    { attributes: { playParams: { catalogId: "6000001" } } },
+    { attributes: { playParams: { catalogId: "6000009" } } }
+  ] } }
+}, "6000001").length, 1)
+assert.equal(bridge.libraryHits({}, CATALOG_ID).length, 0)
+assert.equal(bridge.libraryHits(null, CATALOG_ID).length, 0)
+
+// fetch mock: records calls, programmable per-URL responses.
+function makeFetchMock(respond) {
+  const mock = function(url, options) {
+    mock.calls.push({ url: url, method: (options && options.method) || "GET" })
+    return respond(url, options)
+  }
+  mock.calls = []
+  return mock
+}
+function searchResponse(hits) {
+  return Promise.resolve({ ok: true, status: 200, json: function() {
+    return Promise.resolve({ results: { "library-songs": { data: hits.map(function(cid) {
+      return { attributes: { playParams: { catalogId: cid } } } }) } } })
+  } })
+}
+const flush = function() { return new Promise(function(resolve) { setImmediate(resolve) }) }
+
+;(async function() {
+  // Queue-backed stub so collectBridgeState's current-track gating sees the
+  // item under test (Media Session metadata is absent in Node, so the queue
+  // item becomes the current item directly).
+  const musicStub = {
+    developerToken: "dev", musicUserToken: "user",
+    player: { queue: { items: [], position: null } }
+  }
+  function setQueueItem(item) {
+    musicStub.player.queue.items = item ? [item] : []
+    musicStub.player.queue.position = item ? 0 : null
+  }
+  global.window = { MusicKit: { getInstance: function() { return musicStub } } }
+  // Ratings fetches fire alongside library fetches; 404 = unrated.
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) {
+      return Promise.resolve({ ok: false, status: 404 })
+    }
+    return searchResponse([])
+  })
+
+  // Identity: a library-kind song is trivially present, no request made.
+  setQueueItem(librarySong)
+  bridge.refreshLibraryCache(musicStub, librarySong)
+  await flush()
+  assert.equal(bridge.collectBridgeState().library, "present")
+
+  // Catalog song absent from the library.
+  setQueueItem(catalogSong)
+  bridge.refreshLibraryCache(musicStub, null) // fresh cache for the scenario
+  bridge.refreshLibraryCache(musicStub, catalogSong)
+  await flush()
+  assert.equal(bridge.collectBridgeState().library, "absent")
+
+  // Membership normalization: with no current track the state is "unknown",
+  // never a definite off.
+  setQueueItem(null)
+  assert.equal(bridge.collectBridgeState().library, "unknown")
+  setQueueItem(catalogSong)
+
+  // Already-present response: add reports success without any POST.
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) return Promise.resolve({ ok: false, status: 404 })
+    return searchResponse([CATALOG_ID])
+  })
+  bridge.refreshLibraryCache(musicStub, null) // simulate a fresh lookup
+  bridge.refreshLibraryCache(musicStub, null) // fresh cache for the scenario
+  bridge.refreshLibraryCache(musicStub, catalogSong)
+  await flush()
+  const presentResult = await bridge.addToLibrary(musicStub, catalogSong)
+  assert.deepEqual(presentResult, { ok: true, state: "present" })
+  assert.equal(global.fetch.calls.filter(function(c) { return c.method === "POST" }).length, 0)
+
+  // Successful add: absent → POST 202 → "adding" → confirmed present by
+  // bounded membership polls.
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) return Promise.resolve({ ok: false, status: 404 })
+    if (options && options.method === "POST") return Promise.resolve({ ok: true, status: 202 })
+    return searchResponse([])
+  })
+  bridge.refreshLibraryCache(musicStub, null) // fresh cache for the scenario
+  bridge.refreshLibraryCache(musicStub, catalogSong)
+  await flush()
+  const addingResult = await bridge.addToLibrary(musicStub, catalogSong)
+  assert.deepEqual(addingResult, { ok: true, state: "adding" })
+  assert.equal(bridge.collectBridgeState().library, "adding")
+  // Duplicate write guard while pending.
+  const duplicate = await bridge.addToLibrary(musicStub, catalogSong)
+  assert.deepEqual(duplicate, { ok: false, error: "in-progress" })
+  // Membership flips: the next confirmation poll adopts "present".
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) return Promise.resolve({ ok: false, status: 404 })
+    return searchResponse([CATALOG_ID])
+  })
+  bridge.collectBridgeState() // runs a confirmation poll
+  await flush()
+  assert.equal(bridge.collectBridgeState().library, "present")
+
+  // Stale-result protection: a pending add for track A must never apply to
+  // track B after a track change.
+  const songB = {
+    attributes: { name: "Other Song", playParams: { id: "6000002", kind: "song" } }
+  }
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) return Promise.resolve({ ok: false, status: 404 })
+    if (options && options.method === "POST") return Promise.resolve({ ok: true, status: 202 })
+    const isA = String(url).indexOf("Some%20Song") >= 0
+    return searchResponse(isA ? [] : ["6000002"])
+  })
+  bridge.refreshLibraryCache(musicStub, null) // fresh cache for the scenario
+  bridge.refreshLibraryCache(musicStub, catalogSong)
+  await flush()
+  await bridge.addToLibrary(musicStub, catalogSong) // A now "adding"
+  setQueueItem(songB)                                // track change
+  bridge.refreshLibraryCache(musicStub, songB)       // lookup for B starts
+  await flush(); await flush()
+  assert.equal(bridge.collectBridgeState().library, "present") // B's own state
+
+  // HTTP failure surfaces as "error".
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) return Promise.resolve({ ok: false, status: 404 })
+    if (options && options.method === "POST") return Promise.resolve({ ok: false, status: 500 })
+    return searchResponse([])
+  })
+  setQueueItem(catalogSong)
+  bridge.refreshLibraryCache(musicStub, null) // fresh cache for the scenario
+  bridge.refreshLibraryCache(musicStub, catalogSong)
+  await flush()
+  const failed = await bridge.addToLibrary(musicStub, catalogSong)
+  assert.deepEqual(failed, { ok: false, error: "http-500" })
+  assert.equal(bridge.collectBridgeState().library, "error")
+
+  // Network failure (timeout/abort/offline) surfaces as "error", too.
+  global.fetch = makeFetchMock(function(url, options) {
+    if (String(url).indexOf("/ratings/") >= 0) return Promise.resolve({ ok: false, status: 404 })
+    if (options && options.method === "POST") return Promise.reject(new Error("aborted"))
+    return searchResponse([])
+  })
+  setQueueItem(catalogSong)
+  bridge.refreshLibraryCache(musicStub, null) // fresh cache for the scenario
+  bridge.refreshLibraryCache(musicStub, catalogSong)
+  await flush()
+  const networkFail = await bridge.addToLibrary(musicStub, catalogSong)
+  assert.deepEqual(networkFail, { ok: false, error: "network" })
+  assert.equal(bridge.collectBridgeState().library, "error")
+
+  // Missing current track: the command fails without any request.
+  const noTrackCalls = global.fetch.calls.length
+  const noTrack = await bridge.addToLibrary(musicStub, null)
+  assert.deepEqual(noTrack, { ok: false, error: "no-track" })
+  assert.equal(global.fetch.calls.length, noTrackCalls)
+
+  delete global.window
+  delete global.fetch
+
+  console.log("duration bridge tests passed")
+})().catch(function(error) {
+  console.error(error)
+  process.exit(1)
+})

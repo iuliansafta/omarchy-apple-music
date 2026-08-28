@@ -41,6 +41,8 @@ Item {
   readonly property var autoplay:
     bridgeActive && bridgeState && typeof bridgeState.autoplay === "boolean"
     ? bridgeState.autoplay : null
+  readonly property string libraryState:
+    bridgeActive && bridgeState && bridgeState.library ? String(bridgeState.library) : "unknown"
 
   readonly property bool bridgeActive: available && Model.bridgeIsActive(bridgeState, title)
   readonly property string rating:
@@ -134,6 +136,10 @@ Item {
 
   function jumpToQueueIndex(index) {
     sendBridgeCommand({ action: "jump", index: Number(index) || 0 })
+  }
+
+  function addToLibrary() {
+    sendBridgeCommand({ action: "add-to-library" })
   }
 
   function appendHistory() {
@@ -316,6 +322,7 @@ Item {
         shuffle: root.shuffleMode,
         repeat: root.repeatMode,
         autoplay: root.autoplay,
+        library: root.libraryState,
         bridgeActive: root.bridgeActive,
         upNext: root.upNext,
         recentTracks: root.recentTracks
@@ -333,6 +340,7 @@ Item {
     function setShuffle(enabled: bool): void { root.setShuffle(enabled) }
     function cycleRepeat(): void { root.cycleRepeat() }
     function setAutoplay(enabled: bool): void { root.setAutoplay(enabled) }
+    function addToLibrary(): void { root.addToLibrary() }
     function jumpTo(index: int): void { root.jumpToQueueIndex(index) }
   }
 }

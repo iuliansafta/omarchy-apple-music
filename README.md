@@ -18,6 +18,7 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 - Recently played history, persisted across shell and machine restarts
 - Shuffle, repeat (off/all/one), and autoplay controls, synced with Apple Music
 - Recently played entries replay the exact song (old entries keep working)
+- Add the current song to the Apple Music library, with truthful state
 - Player panel with a blurred artwork backdrop
 
 ## Requirements
@@ -100,6 +101,10 @@ Autoplay means Apple Music's infinite continuation of the queue (recommended tra
 ## Recently played
 
 Recently played entries persist across shell and machine restarts in `~/.local/share/omarchy-apple-music/history.jsonl`. New entries recorded while the bridge is active carry an exact-song descriptor (catalog/library song IDs from MusicKit); clicking such an entry replaces Apple Music's current playback with that exact song — never a title/artist guess — and lets Apple Music establish its normal continuation. Entries recorded before this feature (or while the bridge was unavailable) remain listed but only focus Apple Music when clicked.
+
+## Add to library
+
+The library button next to the rating controls adds the currently audible song to your Apple Music library. It is a distinct action from like/dislike: membership is read from Apple's own library API (matched by exact catalog ID, never by title), and the button only offers an add when Apple reports the song as absent. Pending adds show a waiting state and cannot trigger duplicate writes; the check mark appears only once Apple's library actually reflects the song. Failure and unknown states stay non-committal instead of claiming success. Removal is not offered — Apple's web API does not allow it from the browser.
 
 ## Remove
 

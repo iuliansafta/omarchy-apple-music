@@ -198,6 +198,139 @@ function normalizeQueueEntry(item, index) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Library membership. Endpoints verified against the live API from the page
+// context (tokens MusicKit already holds):
+// - membership: GET /v1/me/library/search?term=<song name>&types=library-songs
+//   then match playParams.catalogId exactly against the catalog id (the
+//   text only narrows candidates; the match is by stable id — filter[track_id]
+//   is rejected with 400 by the API).
+// - add: POST /v1/me/library?ids[songs]=<catalog id> → 202 Accepted, applied
+//   asynchronously; success is only claimed once membership flips to present
+//   within a bounded number of confirmation polls.
+// - DELETE is CORS-blocked from the web origin, so this is add-only.
+var LIBRARY_CONFIRM_POLLS = 5
+
+var libraryCache = { id: "", state: "unknown" }
+var libraryConfirm = 0
+
+// Library items appear both as kind "library-songs" (queue items) and as
+// kind "song" with isLibrary: true and an "i."-prefixed id (live API
+// responses), so all three markers are checked.
+function isLibraryItem(item) {
+  if (ratingKind(item) === "library-songs") return true
+  var params = playParamsOf(item)
+  if (params && params.isLibrary === true) return true
+  return playableId(item).indexOf("i.") === 0
+}
+
+function librarySearchUrl(item) {
+  return "https://api.music.apple.com/v1/me/library/search?term=" +
+    encodeURIComponent(item && item.attributes && item.attributes.name || "") +
+    "&types=library-songs&limit=10"
+}
+
+function libraryAddUrl(item) {
+  return "https://api.music.apple.com/v1/me/library?ids%5Bsongs%5D=" +
+    encodeURIComponent(playableId(item))
+}
+
+function libraryHits(data, catalogId) {
+  var section = data && data.results && data.results["library-songs"]
+  var items = section && section.data ? section.data : []
+  return items.filter(function(song) {
+    var params = song.attributes && song.attributes.playParams
+    return params && String(params.catalogId || "") === catalogId
+  })
+}
+
+function queryLibraryMembership(music, item, id, onResult) {
+  var controller = new AbortController()
+  var timer = setTimeout(function() { controller.abort() }, 3000)
+  fetch(librarySearchUrl(item), { headers: authHeaders(music), signal: controller.signal })
+    .then(function(response) { return response.ok ? response.json() : null })
+    .then(function(data) {
+      if (libraryCache.id === id) onResult(libraryHits(data, id).length > 0)
+    })
+    .catch(function() {
+      if (libraryCache.id === id) onResult(null)  // lookup failed, not absent
+    })
+    .then(function() { clearTimeout(timer) })
+}
+
+// Library lookups run once per track id, like ratings; collect() reports the
+// cached state and never awaits the fetch. Library-kind items are trivially
+// present. After a 202 add, bounded confirmation polls flip adding → present
+// (or unknown when unconfirmed); every async completion is guarded by the
+// cache id so a track change can never adopt another song's result.
+function refreshLibraryCache(music, item) {
+  var id = playableId(item)
+  if (!id) {
+    libraryCache = { id: "", state: "unknown" }
+    libraryConfirm = 0
+    return
+  }
+  if (libraryCache.id === id) {
+    if (libraryCache.state === "adding" && libraryConfirm > 0) {
+      libraryConfirm -= 1
+      var remaining = libraryConfirm
+      queryLibraryMembership(music, item, id, function(present) {
+        if (libraryCache.id !== id || libraryCache.state !== "adding") return
+        if (present) { libraryCache.state = "present"; return }
+        if (remaining === 0) libraryCache.state = "unknown"
+      })
+    }
+    return
+  }
+  libraryCache = { id: id, state: "unknown" }
+  libraryConfirm = 0
+  if (isLibraryItem(item)) {
+    libraryCache.state = "present"
+    return
+  }
+  queryLibraryMembership(music, item, id, function(present) {
+    if (libraryCache.id !== id || libraryCache.state === "adding") return
+    libraryCache.state = present === null ? "unknown" : present ? "present" : "absent"
+  })
+}
+
+// Add the current (catalog) song to the library. Idempotency guards: no-op
+// while a request for the same track is in flight, and an already-present
+// track reports success without a write.
+function addToLibrary(music, item) {
+  var id = playableId(item)
+  if (!id) return Promise.resolve({ ok: false, error: "no-track" })
+  if (isLibraryItem(item)) {
+    return Promise.resolve({ ok: true, state: "present" })
+  }
+  if (libraryCache.id === id && libraryCache.state === "adding") {
+    return Promise.resolve({ ok: false, error: "in-progress" })
+  }
+  if (libraryCache.id === id && libraryCache.state === "present") {
+    return Promise.resolve({ ok: true, state: "present" })
+  }
+  libraryCache = { id: id, state: "adding" }
+  libraryConfirm = LIBRARY_CONFIRM_POLLS
+  var controller = new AbortController()
+  var timer = setTimeout(function() { controller.abort() }, 5000)
+  return fetch(libraryAddUrl(item), { method: "POST", headers: authHeaders(music), signal: controller.signal })
+    .then(function(response) {
+      if (!response.ok) {
+        if (libraryCache.id === id) { libraryCache.state = "error"; libraryConfirm = 0 }
+        return { ok: false, error: "http-" + response.status }
+      }
+      // 202 Accepted: membership confirmations drive the final state.
+      return { ok: true, state: "adding" }
+    })
+    .catch(function() {
+      if (libraryCache.id === id) { libraryCache.state = "error"; libraryConfirm = 0 }
+      return { ok: false, error: "network" }
+    })
+    .then(function(result) { clearTimeout(timer); return result })
+}
+
+var ratingCache = { id: "", state: "unknown" }
+
 // {items, position} for the live queue. Prefers the public MusicKit.Queue
 // (items + position); falls back to the private playback controller queue the
 // duration bridge already relies on, locating the current item by identity.
@@ -306,7 +439,7 @@ function collectBridgeState() {
     var current = currentTrackItem(music)
     var trackId = current ? playableId(current) : ""
     if (trackId) refreshRatingCache(music, current)
-
+    if (trackId) refreshLibraryCache(music, current)
     // MusicKit's queue position can go stale around jumps (playMediaItem),
     // so window the up-next list from where the matched current item
     // actually sits, falling back to the reported position.
@@ -326,7 +459,9 @@ function collectBridgeState() {
       shuffle: normalizeShuffle(music.shuffleMode),
       repeat: normalizeRepeat(music.repeatMode),
       autoplay: normalizeAutoplay(music.autoplayEnabled),
-      play: current ? playbackDescriptorOf(current) : null
+      play: current ? playbackDescriptorOf(current) : null,
+      library: current && trackId && libraryCache.id === trackId
+        ? libraryCache.state : "unknown"
     }
   } catch (_) {
     return { ok: false }
@@ -431,6 +566,12 @@ function handleCommand(payload) {
       if (!descriptor) return Promise.resolve({ ok: false, error: "bad-descriptor" })
       return playDescriptor(music, descriptor)
     }
+
+    if (action === "add-to-library") {
+      var current = currentTrackItem(music)
+      if (!current) return Promise.resolve({ ok: false, error: "no-track" })
+      return addToLibrary(music, current)
+    }
     return Promise.resolve({ ok: false, error: "unknown-action" })
   } catch (_) {
     return Promise.resolve({ ok: false, error: "exception" })
@@ -458,11 +599,17 @@ if (typeof module !== "undefined") {
     musicKitItemForMetadata: musicKitItemForMetadata,
     needsDurationBridge: needsDurationBridge,
     playableId: playableId,
+    isLibraryItem: isLibraryItem,
     ratingKind: ratingKind,
     ratingStateForValue: ratingStateForValue,
     playbackDescriptorOf: playbackDescriptorOf,
     validPlaybackDescriptor: validPlaybackDescriptor,
     playDescriptor: playDescriptor,
+    librarySearchUrl: librarySearchUrl,
+    libraryAddUrl: libraryAddUrl,
+    libraryHits: libraryHits,
+    refreshLibraryCache: refreshLibraryCache,
+    addToLibrary: addToLibrary,
     normalizeShuffle: normalizeShuffle,
     normalizeRepeat: normalizeRepeat,
     normalizeAutoplay: normalizeAutoplay,

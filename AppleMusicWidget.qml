@@ -32,6 +32,10 @@ BarWidget {
   readonly property string repeatIcon: String.fromCodePoint(0xf0459)
   readonly property string repeatOnceIcon: String.fromCodePoint(0xf045a)
   readonly property string repeatOffIcon: String.fromCodePoint(0xf045b)
+  readonly property string plusIcon: String.fromCodePoint(0xf0415)
+  readonly property string checkIcon: String.fromCodePoint(0xf012c)
+  readonly property string clockOutlineIcon: String.fromCodePoint(0xf0465)
+  readonly property string alertIcon: String.fromCodePoint(0xf0292)
   readonly property string autoplayIcon: String.fromCodePoint(0xf0ab5)
   visible: !hideWhenNotRunning || (music && music.running)
   readonly property string trackLabel: {
@@ -379,6 +383,29 @@ BarWidget {
           enabled: !!root.music && root.music.bridgeActive
           opacity: enabled ? 1 : 0.4
           onClicked: root.music.toggleDislike()
+        }
+
+        // Add the current song to the Apple Music library. Distinct from
+        // like/dislike: state comes from Apple's own library API, and an
+        // unknown state stays disabled rather than offering a blind add.
+        Button {
+          width: Style.space(44)
+          height: Style.space(40)
+          iconText: !root.music || root.music.libraryState === "unknown" ? root.plusIcon
+            : root.music.libraryState === "absent" ? root.plusIcon
+            : root.music.libraryState === "adding" ? root.clockOutlineIcon
+            : root.music.libraryState === "present" ? root.checkIcon : root.alertIcon
+          foreground: root.music && root.music.libraryState === "present"
+            ? Color.accent : root.bar.foreground
+          enabled: !!root.music && root.music.libraryState === "absent"
+          opacity: enabled ? 1 : 0.4
+          Accessible.name: !root.music || root.music.libraryState === "unknown"
+            ? "Library state unavailable"
+            : root.music.libraryState === "absent" ? "Add current song to library"
+            : root.music.libraryState === "adding" ? "Adding current song to library"
+            : root.music.libraryState === "present" ? "Current song is in your library"
+            : "Couldn't add to library"
+          onClicked: root.music.addToLibrary()
         }
       }
 
