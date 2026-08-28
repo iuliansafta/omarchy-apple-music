@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "iuliansafta.apple-music",
   "name": "Apple Music",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": "Iulian Safta",
   "description": "Apple Music web player controls and now-playing information for the Omarchy bar.",
   "homepage": "https://github.com/iuliansafta/omarchy-apple-music",
