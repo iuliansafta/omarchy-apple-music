@@ -52,6 +52,27 @@ function upNextFromState(state) {
   return state && Array.isArray(state.upNext) ? state.upNext : []
 }
 
+// MPRIS metadata is untrusted. Bound it before it reaches QML rendering,
+// persisted history, or a Process argv, and neutralize rich-text delimiters
+// used by shared tooltip renderers. Controls become spaces rather than layout
+// instructions so a metadata value remains a single display line.
+function metadataText(value) {
+  return String(value || "").slice(0, 512)
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/</g, "‹").replace(/>/g, "›")
+}
+
+// Chromium normally publishes either an HTTPS cover or a canonical local
+// file URI. Reject every other Image source scheme, remote file authorities,
+// whitespace/control characters, and overlong URLs.
+function artworkUrl(value) {
+  var url = String(value || "")
+  if (!url || url.length > 2048 || /[\u0000-\u0020\u007f]/.test(url)) return ""
+  if (/^https:\/\/[^/?#]+(?:[/?#]|$)/i.test(url)) return url
+  if (/^file:\/\/\/(?!\/)/i.test(url)) return url
+  return ""
+}
+
 // History records may carry a "play" descriptor identifying the exact song,
 // same shape the extension produces: { kind: "song", id, catalogId? }.
 // Malformed or missing descriptors parse as null, keeping legacy records
@@ -59,18 +80,19 @@ function upNextFromState(state) {
 function historyPlaybackDescriptor(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
   var id = typeof value.id === "string" ? value.id : ""
-  if (!id || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return null
+  if (!id || id.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return null
   if (typeof value.kind !== "undefined" && value.kind !== "song") return null
   var descriptor = { kind: "song", id: id }
   if (typeof value.catalogId === "string" && value.catalogId !== "") {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.catalogId)) return null
+    if (value.catalogId.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.catalogId)) return null
     descriptor.catalogId = value.catalogId
   }
   return descriptor
 }
 
 function historyLogKey(title, artist) {
-  return String(title || "").trim().toLowerCase() + "|" + String(artist || "").trim().toLowerCase()
+  return metadataText(title).trim().toLowerCase() + "|" +
+    metadataText(artist).trim().toLowerCase()
 }
 
 // Entries are already newest-first. Keep only the newest occurrence of each
@@ -101,13 +123,15 @@ function parseHistoryLines(text, cap) {
     if (!line) continue
     try {
       var entry = JSON.parse(line)
-      if (entry && typeof entry.title === "string" && entry.title.trim() !== "") {
+      var title = entry && typeof entry.title === "string"
+        ? metadataText(entry.title) : ""
+      if (title.trim() !== "") {
         entries.push({
           ts: Number(entry.ts) || 0,
-          title: String(entry.title),
-          artist: String(entry.artist || ""),
-          album: String(entry.album || ""),
-          art: String(entry.art || ""),
+          title: title,
+          artist: metadataText(entry.artist),
+          album: metadataText(entry.album),
+          art: artworkUrl(entry.art),
           play: historyPlaybackDescriptor(entry.play)
         })
       }
@@ -118,37 +142,54 @@ function parseHistoryLines(text, cap) {
   return uniqueHistoryEntries(entries, cap)
 }
 
-// File I/O below runs as `python3 -c <script> <args...>`. Every touch of a
-// user-writable path goes through a single bounded O_NOFOLLOW|O_NONBLOCK
-// descriptor verified (fstat) to be a self-owned regular file, so a symlink
-// or FIFO planted at the path can neither redirect the write/read nor block
-// the shell, and no read is unbounded.
+// File I/O below runs as `python3 -c <script> <args...>`. The history parent
+// is pinned as a self-owned 0700 directory, then every bounded file operation
+// is relative to that descriptor and verifies a self-owned regular final
+// component opened with O_NOFOLLOW|O_NONBLOCK. Parent replacement, symlinks,
+// and FIFOs can therefore neither redirect nor block history I/O.
 
 // argv[1] = history path. Prints at most the last 1 MiB of the file; a
 // missing/unreadable/foreign file prints nothing (empty history, no error).
 function historyLoadPythonScript() {
   return [
     'import os, stat, sys',
+    'parent, name = os.path.split(sys.argv[1])',
+    'if not parent or not name:',
+    '    sys.exit(0)',
     'try:',
-    '    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)',
+    '    dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)',
     'except OSError:',
     '    sys.exit(0)',
     'try:',
-    '    info = os.fstat(fd)',
-    '    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '    dinfo = os.fstat(dirfd)',
+    '    if dinfo.st_uid != os.geteuid():',
     '        sys.exit(0)',
-    '    limit = 1048576',
-    '    if info.st_size > limit:',
-    '        os.lseek(fd, info.st_size - limit, os.SEEK_SET)',
-    '    total = 0',
-    '    while total < limit:',
-    '        chunk = os.read(fd, 65536)',
-    '        if not chunk:',
-    '            break',
-    '        total += len(chunk)',
-    '        sys.stdout.buffer.write(chunk)',
+    '    if stat.S_IMODE(dinfo.st_mode) != 0o700:',
+    '        os.fchmod(dirfd, 0o700)',
+    '        if stat.S_IMODE(os.fstat(dirfd).st_mode) != 0o700:',
+    '            sys.exit(0)',
+    '    try:',
+    '        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)',
+    '    except OSError:',
+    '        sys.exit(0)',
+    '    try:',
+    '        info = os.fstat(fd)',
+    '        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '            sys.exit(0)',
+    '        limit = 1048576',
+    '        if info.st_size > limit:',
+    '            os.lseek(fd, info.st_size - limit, os.SEEK_SET)',
+    '        total = 0',
+    '        while total < limit:',
+    '            chunk = os.read(fd, min(65536, limit - total))',
+    '            if not chunk:',
+    '                break',
+    '            total += len(chunk)',
+    '            sys.stdout.buffer.write(chunk)',
+    '    finally:',
+    '        os.close(fd)',
     'finally:',
-    '    os.close(fd)'
+    '    os.close(dirfd)'
   ].join('\n')
 }
 
@@ -160,40 +201,61 @@ function historyAppendPythonScript() {
     'entry, path = sys.argv[1], sys.argv[2]',
     'if len(entry) > 65536 or "\\n" in entry:',
     '    sys.exit(0)',
-    'os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)',
-    'fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)',
+    'parent, name = os.path.split(path)',
+    'if not parent or not name:',
+    '    sys.exit(0)',
+    'os.makedirs(parent, mode=0o700, exist_ok=True)',
+    'dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)',
     'try:',
-    '    info = os.fstat(fd)',
-    '    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '    dinfo = os.fstat(dirfd)',
+    '    if dinfo.st_uid != os.geteuid():',
     '        sys.exit(0)',
-    '    os.write(fd, entry.encode() + b"\\n")',
-    'finally:',
-    '    os.close(fd)',
-    'fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)',
-    'try:',
-    '    info = os.fstat(fd)',
-    '    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
-    '        sys.exit(0)',
-    '    limit = 1048576',
-    '    if info.st_size > limit:',
-    '        os.lseek(fd, info.st_size - limit, os.SEEK_SET)',
-    '    data = b""',
-    '    while len(data) < limit:',
-    '        chunk = os.read(fd, 65536)',
-    '        if not chunk:',
-    '            break',
-    '        data += chunk',
-    'finally:',
-    '    os.close(fd)',
-    'lines = [l for l in data.split(b"\\n") if l]',
-    'if info.st_size > limit or len(lines) > 500:',
-    '    tmp = path + ".tmp"',
-    '    tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)',
+    '    if stat.S_IMODE(dinfo.st_mode) != 0o700:',
+    '        os.fchmod(dirfd, 0o700)',
+    '        if stat.S_IMODE(os.fstat(dirfd).st_mode) != 0o700:',
+    '            sys.exit(0)',
+    '    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dirfd)',
     '    try:',
-    '        os.write(tfd, b"\\n".join(lines[-200:]) + b"\\n")',
+    '        info = os.fstat(fd)',
+    '        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '            sys.exit(0)',
+    '        os.fchmod(fd, 0o600)',
+    '        os.write(fd, entry.encode() + b"\\n")',
     '    finally:',
-    '        os.close(tfd)',
-    '    os.replace(tmp, path)'
+    '        os.close(fd)',
+    '    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)',
+    '    try:',
+    '        info = os.fstat(fd)',
+    '        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '            sys.exit(0)',
+    '        limit = 1048576',
+    '        if info.st_size > limit:',
+    '            os.lseek(fd, info.st_size - limit, os.SEEK_SET)',
+    '        data = b""',
+    '        while len(data) < limit:',
+    '            chunk = os.read(fd, min(65536, limit - len(data)))',
+    '            if not chunk:',
+    '                break',
+    '            data += chunk',
+    '    finally:',
+    '        os.close(fd)',
+    '    lines = [line for line in data.split(b"\\n") if line]',
+    '    if info.st_size > limit or len(lines) > 500:',
+    '        tmp = "." + name + ".tmp." + str(os.getpid())',
+    '        tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)',
+    '        try:',
+    '            os.write(tfd, b"\\n".join(lines[-200:]) + b"\\n")',
+    '        finally:',
+    '            os.close(tfd)',
+    '        try:',
+    '            os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)',
+    '        finally:',
+    '            try:',
+    '                os.unlink(tmp, dir_fd=dirfd)',
+    '            except FileNotFoundError:',
+    '                pass',
+    'finally:',
+    '    os.close(dirfd)'
   ].join('\n')
 }
 
@@ -229,6 +291,8 @@ if (typeof module !== "undefined") {
     sameTrack: sameTrack,
     bridgeIsActive: bridgeIsActive,
     upNextFromState: upNextFromState,
+    metadataText: metadataText,
+    artworkUrl: artworkUrl,
     historyLogKey: historyLogKey,
     uniqueHistoryEntries: uniqueHistoryEntries,
     historyPlaybackDescriptor: historyPlaybackDescriptor,

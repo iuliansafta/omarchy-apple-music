@@ -61,15 +61,19 @@ Item {
   readonly property bool available: activePlayer !== null
   readonly property bool hasMedia: available && (title !== "" || artist !== "")
   readonly property bool playing: available && activePlayer.isPlaying
-  readonly property string title: available ? (activePlayer.trackTitle || "") : ""
-  readonly property string artist: available ? (activePlayer.trackArtist || "") : ""
-  readonly property string album: available ? (activePlayer.trackAlbum || "") : ""
+  readonly property string title: available
+    ? Model.metadataText(activePlayer.trackTitle) : ""
+  readonly property string artist: available
+    ? Model.metadataText(activePlayer.trackArtist) : ""
+  readonly property string album: available
+    ? Model.metadataText(activePlayer.trackAlbum) : ""
   // Chromium republishes MPRIS metadata several times per track switch, each
   // time pointing mpris:artUrl at a new /tmp file and deleting the previous
   // one within ~600ms. Binding an Image directly to that churn loads files
   // that are already gone and flashes the artwork fallback. Adopt the URL
   // only once it stops changing, so only the surviving final file is used.
-  readonly property string rawArtUrl: available ? (activePlayer.trackArtUrl || "") : ""
+  readonly property string rawArtUrl: available
+    ? Model.artworkUrl(activePlayer.trackArtUrl) : ""
   property string artUrl: ""
   readonly property real position: {
     positionRevision
@@ -148,15 +152,23 @@ Item {
     if (key === lastHistoryKey) return
     lastHistoryKey = key
     var entry = {
-      ts: Date.now(), title: title, artist: artist, album: album, art: artUrl,
+      ts: Date.now(),
+      title: Model.metadataText(title),
+      artist: Model.metadataText(artist),
+      album: Model.metadataText(album),
+      art: Model.artworkUrl(artUrl),
       // Exact-song descriptor from the matched MusicKit item; null (kept
       // non-replayable) while the bridge is not actively matching MPRIS.
-      play: bridgeActive && bridgeState && bridgeState.play ? bridgeState.play : null
+      play: Model.historyPlaybackDescriptor(
+        bridgeActive && bridgeState ? bridgeState.play : null)
     }
+    var payload = JSON.stringify(entry)
+    // Keep the process argument bounded in QML; the helper repeats this check
+    // as defense in depth, after the process boundary.
+    if (payload.length > 65536) return
     recentTracks = Model.uniqueHistoryEntries([entry].concat(recentTracks), recentCap)
     historyAppendProc.command = [
-      "python3", "-c", Model.historyAppendPythonScript(),
-      JSON.stringify(entry), historyPath
+      "python3", "-c", Model.historyAppendPythonScript(), payload, historyPath
     ]
     historyAppendProc.running = true
   }
