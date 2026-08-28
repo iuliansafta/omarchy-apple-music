@@ -30,6 +30,18 @@ assert.equal(model.bridgeIsActive({ ok: true, trackTitle: "" }, ""), false)
 
 assert.equal(model.upNextFromState(null).length, 0)
 assert.equal(model.upNextFromState({ ok: true }).length, 0)
+
+// Untrusted MPRIS strings are bounded before they reach QML, history JSON,
+// or process argv. Markup delimiters and controls cannot trigger rich text.
+assert.equal(model.metadataText("Song <b>title</b>\nnext"), "Song ‹b›title‹/b› next")
+assert.equal(model.metadataText("x".repeat(600)).length, 512)
+assert.equal(model.artworkUrl("https://example.com/cover.jpg"), "https://example.com/cover.jpg")
+assert.equal(model.artworkUrl("file:///tmp/cover.jpg"), "file:///tmp/cover.jpg")
+assert.equal(model.artworkUrl("http://example.com/cover.jpg"), "")
+assert.equal(model.artworkUrl("data:image/png;base64,AAAA"), "")
+assert.equal(model.artworkUrl("file://remote/cover.jpg"), "")
+assert.equal(model.artworkUrl("https://example.com/" + "x".repeat(2048)), "")
+
 const historyLines = [
   JSON.stringify({ ts: 1, title: "A", artist: "X" }),
   JSON.stringify({ ts: 2, title: "B", artist: "Y", album: "Album", art: "b.jpg" }),
@@ -111,6 +123,11 @@ try {
   execFileSync("python3", ["-c", model.historyAppendPythonScript(), entry, historyFile])
   const loaded = execFileSync("python3", ["-c", model.historyLoadPythonScript(), historyFile]).toString()
   assert.equal(loaded, entry + "\n" + entry + "\n")
+  // The pinned history parent is private even if it was initially broad.
+  const historyParent = path.dirname(historyFile)
+  fs.chmodSync(historyParent, 0o755)
+  assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), historyFile]).toString(), loaded)
+  assert.equal(fs.statSync(historyParent).mode & 0o777, 0o700)
   // Missing file: silent empty output, exit 0.
   assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), historyFile + ".nope"]).toString(), "")
 
@@ -123,6 +140,18 @@ try {
   assert.equal(fs.readFileSync(victim, "utf8"), "untouched\n")
   // Load treats a symlink like a missing file: empty output, no error.
   assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), link]).toString(), "")
+
+  // A symlinked history parent must not redirect append, trim, or load.
+  const parentVictim = path.join(tmp, "parent-victim")
+  fs.mkdirSync(parentVictim)
+  const parentVictimHistory = path.join(parentVictim, "history.jsonl")
+  fs.writeFileSync(parentVictimHistory, "untouched\n")
+  const parentLink = path.join(tmp, "parent-link")
+  fs.symlinkSync(parentVictim, parentLink)
+  const redirectedHistory = path.join(parentLink, "history.jsonl")
+  assert.throws(() => execFileSync("python3", ["-c", model.historyAppendPythonScript(), entry, redirectedHistory], { stdio: "pipe" }))
+  assert.equal(fs.readFileSync(parentVictimHistory, "utf8"), "untouched\n")
+  assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), redirectedHistory]).toString(), "")
 
   // Command write: creates exclusively, refuses to overwrite or follow links.
   const cmdFile = path.join(tmp, "cmds", "cmd-1.json")

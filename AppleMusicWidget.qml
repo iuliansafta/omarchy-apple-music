@@ -219,6 +219,7 @@ BarWidget {
         anchors.verticalCenter: parent.verticalCenter
         anchors.verticalCenterOffset: -0.5
         text: root.trackLabel
+        textFormat: Text.PlainText
         color: root.bar ? root.bar.barForeground : Color.foreground
         font.family: root.bar ? root.popupFontFamily : Style.font.family
         font.pixelSize: Style.font.body
@@ -350,6 +351,7 @@ BarWidget {
           Text {
             width: parent.width
             text: root.music && root.music.title ? root.music.title : "Apple Music"
+            textFormat: Text.PlainText
             color: root.popupForeground
             font.family: root.popupFontFamily
             font.pixelSize: Style.font.subtitle
@@ -360,6 +362,7 @@ BarWidget {
           Text {
             width: parent.width
             text: root.music ? root.music.artist : ""
+            textFormat: Text.PlainText
             visible: text !== ""
             color: Qt.darker(root.popupForeground, 1.3)
             font.family: root.popupFontFamily
@@ -370,6 +373,7 @@ BarWidget {
           Text {
             width: parent.width
             text: root.music ? root.music.album : ""
+            textFormat: Text.PlainText
             visible: text !== ""
             color: Qt.darker(root.popupForeground, 1.6)
             font.family: root.popupFontFamily
@@ -620,6 +624,7 @@ BarWidget {
               width: parent.width - queueDuration.implicitWidth - Style.space(10)
               text: queueRow.modelData.title +
                 (queueRow.modelData.artist ? " — " + queueRow.modelData.artist : "")
+              textFormat: Text.PlainText
               color: root.popupForeground
               font.family: root.popupFontFamily
               font.pixelSize: Style.font.caption
@@ -683,6 +688,7 @@ BarWidget {
               width: parent.width
               text: historyRow.modelData.title +
                 (historyRow.modelData.artist ? " — " + historyRow.modelData.artist : "")
+              textFormat: Text.PlainText
               color: Qt.darker(root.popupForeground, 1.3)
               font.family: root.popupFontFamily
               font.pixelSize: Style.font.caption
