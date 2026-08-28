@@ -20,7 +20,9 @@ Only the Python standard library is used; the WebSocket client is hand-rolled
 import base64
 import json
 import os
+import re
 import socket
+import stat
 import struct
 import sys
 import time
@@ -29,6 +31,19 @@ import urllib.request
 POLL_INTERVAL = 1.0
 EVAL_TIMEOUT = 6.0
 MAX_COMMAND_ATTEMPTS = 3
+
+# Hard ceilings. The DevTools endpoint is only *expected* to be Chromium; a
+# compromised or substituted localhost listener must not be able to drive
+# unbounded allocation in this persistent process.
+MAX_HANDSHAKE_BYTES = 16 * 1024      # HTTP 101 upgrade response
+MAX_HTTP_BODY_BYTES = 512 * 1024     # /json/list response body
+MAX_WS_MESSAGE_BYTES = 1024 * 1024   # one CDP message (frames + fragments)
+MAX_COMMAND_BYTES = 64 * 1024        # one *.json command file
+MAX_STATE_STRING = 512               # any string forwarded to the shell
+MAX_UPNEXT_ENTRIES = 40
+
+COMMAND_NAME = re.compile(r"^[A-Za-z0-9._-]+\.json$")
+DESCRIPTOR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class ProtocolError(Exception):
@@ -54,6 +69,8 @@ class CdpClient:
         self._sock.sendall(request.encode())
         response = b""
         while b"\r\n\r\n" not in response:
+            if len(response) > MAX_HANDSHAKE_BYTES:
+                raise ProtocolError("handshake response too large")
             chunk = self._sock.recv(4096)
             if not chunk:
                 raise ProtocolError("connection closed during handshake")
@@ -95,6 +112,8 @@ class CdpClient:
             length = struct.unpack(">H", self._read_exact(2, deadline))[0]
         elif length == 127:
             length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
+        if length > MAX_WS_MESSAGE_BYTES:
+            raise ProtocolError(f"frame too large: {length} bytes")
         payload = self._read_exact(length, deadline) if length else b""
         return fin, opcode, payload
 
@@ -112,6 +131,7 @@ class CdpClient:
 
     def _read_message(self, deadline):
         chunks = []
+        total = 0
         while True:
             fin, opcode, payload = self._read_frame(deadline)
             if opcode == 9:  # ping
@@ -121,10 +141,14 @@ class CdpClient:
                 raise ProtocolError("server sent close frame")
             if opcode in (1, 2):
                 chunks = [payload]
+                total = len(payload)
             elif opcode == 0 and chunks:
                 chunks.append(payload)
+                total += len(payload)
             else:
                 continue
+            if total > MAX_WS_MESSAGE_BYTES:
+                raise ProtocolError("fragmented message too large")
             if fin:
                 return b"".join(chunks)
 
@@ -169,8 +193,8 @@ def read_devtools_port(profile_dir):
     # --remote-debugging-port=0.
     try:
         with open(os.path.join(profile_dir, "DevToolsActivePort")) as handle:
-            port = int(handle.readline().strip() or 0)
-            return port or None
+            port = int(handle.readline(16).strip() or 0)
+            return port if 0 < port < 65536 else None
     except (OSError, ValueError):
         return None
 
@@ -179,12 +203,23 @@ def find_page_target(port):
     url = f"http://127.0.0.1:{port}/json/list"
     try:
         with urllib.request.urlopen(url, timeout=2) as response:
-            targets = json.load(response)
+            body = response.read(MAX_HTTP_BODY_BYTES + 1)
+            if len(body) > MAX_HTTP_BODY_BYTES:
+                return None
+            targets = json.loads(body)
     except (OSError, ValueError):
         return None
+    if not isinstance(targets, list):
+        return None
     for target in targets:
+        if not isinstance(target, dict):
+            continue
         if target.get("type") == "page" and str(target.get("url", "")).startswith("https://music.apple.com"):
-            return target.get("webSocketDebuggerUrl")
+            ws_url = target.get("webSocketDebuggerUrl")
+            # Only ever dial back to loopback, no matter what the endpoint
+            # claims.
+            if isinstance(ws_url, str) and ws_url.startswith("ws://127.0.0.1:"):
+                return ws_url
     return None
 
 
@@ -206,20 +241,66 @@ def connect(profile_dir):
         return None
 
 
-def consume_commands(client, commands_dir, attempts):
+def open_private_dir(path):
+    """Create (0700) and pin a private directory: the returned fd refers to a
+    real directory (no symlink at the final component) owned by this user,
+    with group/other access stripped. All command file operations go through
+    this fd so the directory cannot be swapped underneath the daemon."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        names = sorted(n for n in os.listdir(commands_dir) if n.endswith(".json"))
+        info = os.fstat(fd)
+        if info.st_uid != os.geteuid():
+            raise ProtocolError("commands dir owned by another user")
+        if info.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+    except (OSError, ProtocolError):
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_command_file(dirfd, name):
+    """Bounded no-follow read of one command file relative to the pinned
+    directory fd. Raises ValueError/OSError on anything that is not a small,
+    self-owned regular file containing one JSON object."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular file")
+        if info.st_uid != os.geteuid():
+            raise ValueError("owned by another user")
+        if info.st_size > MAX_COMMAND_BYTES:
+            raise ValueError("command file too large")
+        data = b""
+        while len(data) <= MAX_COMMAND_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > MAX_COMMAND_BYTES:
+            raise ValueError("command file too large")
+    finally:
+        os.close(fd)
+    payload = json.loads(data.decode())
+    if not isinstance(payload, dict):
+        raise ValueError("command payload must be a JSON object")
+    return payload
+
+
+def consume_commands(client, commands_fd, attempts):
+    try:
+        names = sorted(n for n in os.listdir(commands_fd) if COMMAND_NAME.match(n))
     except OSError:
         return
     for name in names:
-        path = os.path.join(commands_dir, name)
         try:
-            with open(path) as handle:
-                payload = json.load(handle)
-        except (OSError, json.JSONDecodeError) as error:
+            payload = read_command_file(commands_fd, name)
+        except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as error:
             print(f"bridge-daemon: bad command {name}: {error}", file=sys.stderr, flush=True)
             try:
-                os.unlink(path)
+                os.unlink(name, dir_fd=commands_fd)
             except OSError:
                 pass
             continue
@@ -227,12 +308,12 @@ def consume_commands(client, commands_dir, attempts):
                      + json.dumps(payload) + ") : null"
         try:
             value = client.evaluate(expression)
-        except ProtocolError as error:
+        except ProtocolError:
             # Connection trouble: keep the file for a bounded number of
             # retries across reconnects.
             if note_command_failure(name, attempts):
                 print(f"bridge-daemon: command dropped after retries: {name}", file=sys.stderr, flush=True)
-                _drop(path, name)
+                _drop(commands_fd, name)
             return  # the socket is probably dead; stop consuming this round
         attempts.pop(name, None)
         if isinstance(value, dict) and value.get("ok") is False:
@@ -240,14 +321,14 @@ def consume_commands(client, commands_dir, attempts):
             # queue was still loading). Retry a bounded number of times.
             if note_command_failure(name, attempts):
                 print(f"bridge-daemon: command dropped after retries: {name}", file=sys.stderr, flush=True)
-                _drop(path, name)
+                _drop(commands_fd, name)
             continue
-        _drop(path, name)
+        _drop(commands_fd, name)
 
 
-def _drop(path, name):
+def _drop(commands_fd, name):
     try:
-        os.unlink(path)
+        os.unlink(name, dir_fd=commands_fd)
     except OSError:
         pass
     print(f"bridge-daemon: command consumed: {name}", file=sys.stderr, flush=True)
@@ -266,6 +347,75 @@ def note_command_failure(name, attempts):
     return False
 
 
+def _text(value, cap=MAX_STATE_STRING):
+    return value[:cap] if isinstance(value, str) else ""
+
+
+def _finite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return float(value) if -1e12 < value < 1e12 else 0
+
+
+def sanitize_descriptor(value):
+    if not isinstance(value, dict):
+        return None
+    ident = value.get("id")
+    if not isinstance(ident, str) or not DESCRIPTOR_ID.match(ident):
+        return None
+    if "kind" in value and value.get("kind") != "song":
+        return None
+    descriptor = {"kind": "song", "id": ident}
+    catalog = value.get("catalogId")
+    if isinstance(catalog, str) and DESCRIPTOR_ID.match(catalog):
+        descriptor["catalogId"] = catalog
+    return descriptor
+
+
+def sanitize_state(value):
+    """Rebuild the collected page state from a fixed whitelist of typed,
+    length-capped fields. Nothing the page (or a substituted DevTools
+    endpoint) returns is forwarded to the shell verbatim."""
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        return {"ok": False}
+    state = {
+        "ok": True,
+        "trackTitle": _text(value.get("trackTitle")),
+        "trackId": _text(value.get("trackId"), 128),
+        "trackKind": _text(value.get("trackKind"), 32),
+        "rating": _text(value.get("rating"), 16),
+        "queuePosition": int(_finite(value.get("queuePosition"))),
+        "queueLength": int(_finite(value.get("queueLength"))),
+        "repeat": _text(value.get("repeat"), 16),
+        "library": _text(value.get("library"), 32),
+        "play": sanitize_descriptor(value.get("play")),
+    }
+    # Tri-state fields: forwarded only when definitely boolean, so the UI
+    # keeps rendering "unknown" instead of a fabricated off.
+    if isinstance(value.get("shuffle"), bool):
+        state["shuffle"] = value["shuffle"]
+    if isinstance(value.get("autoplay"), bool):
+        state["autoplay"] = value["autoplay"]
+    up_next = []
+    items = value.get("upNext")
+    if isinstance(items, list):
+        for item in items[:MAX_UPNEXT_ENTRIES]:
+            if not isinstance(item, dict):
+                continue
+            title = _text(item.get("title"))
+            if not title:
+                continue
+            up_next.append({
+                "index": int(_finite(item.get("index"))),
+                "id": _text(item.get("id"), 128),
+                "title": title,
+                "artist": _text(item.get("artist")),
+                "durationSeconds": _finite(item.get("durationSeconds")),
+            })
+    state["upNext"] = up_next
+    return state
+
+
 def close_client(client):
     """Close a CdpClient (if any) and return None so callers can clear their
     slot and rediscover a fresh port/page target on the next loop."""
@@ -279,7 +429,11 @@ def main():
         print("Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR", file=sys.stderr)
         return 2
     profile_dir, commands_dir = sys.argv[1], sys.argv[2]
-    os.makedirs(commands_dir, exist_ok=True)
+    try:
+        commands_fd = open_private_dir(commands_dir)
+    except (OSError, ProtocolError) as error:
+        print("bridge-daemon: unusable commands dir: " + str(error), file=sys.stderr, flush=True)
+        return 1
 
     client = None
     attempts = {}
@@ -292,9 +446,8 @@ def main():
                 value = client.evaluate(
                     "window.__omarchyAppleMusic ? window.__omarchyAppleMusic.collect() : null"
                 )
-                if isinstance(value, dict):
-                    state = value
-                consume_commands(client, commands_dir, attempts)
+                state = sanitize_state(value)
+                consume_commands(client, commands_fd, attempts)
             except ProtocolError as error:
                 # The socket or page target is gone (browser closed, page
                 # replaced, WebSocket dropped). Drop the client so the next

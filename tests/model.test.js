@@ -95,10 +95,56 @@ assert.equal(withPlay[1].play, null)
 assert.equal(withPlay[0].play, null)
 assert.equal(model.historyPlaybackDescriptor({ id: "1", extra: "x" }).extra, undefined)
 
-// The append script keeps the file bounded without leaving a torn line.
-const script = model.historyAppendBashScript()
-assert.ok(script.includes("printf"))
-assert.ok(script.includes("tail -n 200"))
-assert.ok(script.includes("mkdir -p"))
+// The file scripts run through python3 with bounded no-follow descriptors.
+// Exercise them for real against a temp dir: append + load round-trip works,
+// and a symlink planted at the path never redirects a write.
+const { execFileSync } = require("node:child_process")
+const fs = require("node:fs")
+const os = require("node:os")
+const path = require("node:path")
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "am-model-test-"))
+try {
+  const historyFile = path.join(tmp, "state", "history.jsonl")
+  const entry = JSON.stringify({ ts: 1, title: "Song", artist: "Artist" })
+  execFileSync("python3", ["-c", model.historyAppendPythonScript(), entry, historyFile])
+  execFileSync("python3", ["-c", model.historyAppendPythonScript(), entry, historyFile])
+  const loaded = execFileSync("python3", ["-c", model.historyLoadPythonScript(), historyFile]).toString()
+  assert.equal(loaded, entry + "\n" + entry + "\n")
+  // Missing file: silent empty output, exit 0.
+  assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), historyFile + ".nope"]).toString(), "")
+
+  // A symlink at the history path must not be followed by append or load.
+  const victim = path.join(tmp, "victim")
+  fs.writeFileSync(victim, "untouched\n")
+  const link = path.join(tmp, "link.jsonl")
+  fs.symlinkSync(victim, link)
+  assert.throws(() => execFileSync("python3", ["-c", model.historyAppendPythonScript(), entry, link], { stdio: "pipe" }))
+  assert.equal(fs.readFileSync(victim, "utf8"), "untouched\n")
+  // Load treats a symlink like a missing file: empty output, no error.
+  assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), link]).toString(), "")
+
+  // Command write: creates exclusively, refuses to overwrite or follow links.
+  const cmdFile = path.join(tmp, "cmds", "cmd-1.json")
+  execFileSync("python3", ["-c", model.commandWritePythonScript(), '{"action":"rate"}', cmdFile])
+  assert.equal(fs.readFileSync(cmdFile, "utf8"), '{"action":"rate"}')
+  execFileSync("python3", ["-c", model.commandWritePythonScript(), '{"action":"other"}', cmdFile])
+  assert.equal(fs.readFileSync(cmdFile, "utf8"), '{"action":"rate"}')
+  const cmdLink = path.join(tmp, "cmds", "cmd-2.json")
+  fs.symlinkSync(victim, cmdLink)
+  execFileSync("python3", ["-c", model.commandWritePythonScript(), '{"action":"evil"}', cmdLink])
+  assert.equal(fs.readFileSync(victim, "utf8"), "untouched\n")
+
+  // Trim: >500 lines collapses to the newest 200.
+  const trimFile = path.join(tmp, "trim.jsonl")
+  const bulk = Array.from({ length: 600 }, (_, i) => JSON.stringify({ ts: i, title: "t" + i })).join("\n") + "\n"
+  fs.writeFileSync(trimFile, bulk)
+  execFileSync("python3", ["-c", model.historyAppendPythonScript(), JSON.stringify({ ts: 601, title: "last" }), trimFile])
+  const trimmed = fs.readFileSync(trimFile, "utf8").trim().split("\n")
+  assert.equal(trimmed.length, 200)
+  assert.equal(JSON.parse(trimmed[trimmed.length - 1]).title, "last")
+} finally {
+  fs.rmSync(tmp, { recursive: true, force: true })
+}
 
 console.log("AppleMusicModel tests passed")

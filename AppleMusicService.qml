@@ -100,7 +100,7 @@ Item {
     if (!bridgeActive) return
     commandSequence += 1
     bridgeCommandProc.command = [
-      "bash", "-c", "printf '%s' \"$1\" > \"$2\"", "sh",
+      "python3", "-c", Model.commandWritePythonScript(),
       JSON.stringify(command), bridgeCommandsDir + "/cmd-" + commandSequence + ".json"
     ]
     bridgeCommandProc.running = true
@@ -155,7 +155,7 @@ Item {
     }
     recentTracks = Model.uniqueHistoryEntries([entry].concat(recentTracks), recentCap)
     historyAppendProc.command = [
-      "bash", "-c", Model.historyAppendBashScript(), "sh",
+      "python3", "-c", Model.historyAppendPythonScript(),
       JSON.stringify(entry), historyPath
     ]
     historyAppendProc.running = true
@@ -273,8 +273,15 @@ Item {
     onStarted: console.log("iuliansafta.apple-music bridge-daemon started")
     stdout: SplitParser {
       onRead: function(line) {
+        var text = String(line || "")
+        // The daemon caps its own output; treat anything larger as a broken
+        // or substituted daemon rather than feeding it to JSON.parse.
+        if (text.length > 2097152) {
+          root.bridgeState = null
+          return
+        }
         try {
-          root.bridgeState = JSON.parse(String(line || ""))
+          root.bridgeState = JSON.parse(text)
         } catch (_) {
           root.bridgeState = null
         }
@@ -288,7 +295,7 @@ Item {
   }
   Process {
     id: historyLoadProc
-    command: ["bash", "-c", 'cat "$1" 2>/dev/null || true', "sh", root.historyPath]
+    command: ["python3", "-c", Model.historyLoadPythonScript(), root.historyPath]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.loadHistoryFinished(String(text || ""))

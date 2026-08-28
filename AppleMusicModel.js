@@ -118,10 +118,104 @@ function parseHistoryLines(text, cap) {
   return uniqueHistoryEntries(entries, cap)
 }
 
-function historyAppendBashScript() {
-  return 'mkdir -p "$(dirname "$2")"; printf \'%s\\n\' "$1" >> "$2"; ' +
-    'lines=$(wc -l < "$2"); ' +
-    'if [ "$lines" -gt 500 ]; then tail -n 200 "$2" > "$2.tmp" && mv "$2.tmp" "$2"; fi'
+// File I/O below runs as `python3 -c <script> <args...>`. Every touch of a
+// user-writable path goes through a single bounded O_NOFOLLOW|O_NONBLOCK
+// descriptor verified (fstat) to be a self-owned regular file, so a symlink
+// or FIFO planted at the path can neither redirect the write/read nor block
+// the shell, and no read is unbounded.
+
+// argv[1] = history path. Prints at most the last 1 MiB of the file; a
+// missing/unreadable/foreign file prints nothing (empty history, no error).
+function historyLoadPythonScript() {
+  return [
+    'import os, stat, sys',
+    'try:',
+    '    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)',
+    'except OSError:',
+    '    sys.exit(0)',
+    'try:',
+    '    info = os.fstat(fd)',
+    '    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '        sys.exit(0)',
+    '    limit = 1048576',
+    '    if info.st_size > limit:',
+    '        os.lseek(fd, info.st_size - limit, os.SEEK_SET)',
+    '    total = 0',
+    '    while total < limit:',
+    '        chunk = os.read(fd, 65536)',
+    '        if not chunk:',
+    '            break',
+    '        total += len(chunk)',
+    '        sys.stdout.buffer.write(chunk)',
+    'finally:',
+    '    os.close(fd)'
+  ].join('\n')
+}
+
+// argv[1] = entry JSON line, argv[2] = history path. Appends one line, then
+// trims the file to its newest 200 lines once it exceeds 500 lines (or 1 MiB).
+function historyAppendPythonScript() {
+  return [
+    'import os, stat, sys',
+    'entry, path = sys.argv[1], sys.argv[2]',
+    'if len(entry) > 65536 or "\\n" in entry:',
+    '    sys.exit(0)',
+    'os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)',
+    'fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)',
+    'try:',
+    '    info = os.fstat(fd)',
+    '    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '        sys.exit(0)',
+    '    os.write(fd, entry.encode() + b"\\n")',
+    'finally:',
+    '    os.close(fd)',
+    'fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)',
+    'try:',
+    '    info = os.fstat(fd)',
+    '    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():',
+    '        sys.exit(0)',
+    '    limit = 1048576',
+    '    if info.st_size > limit:',
+    '        os.lseek(fd, info.st_size - limit, os.SEEK_SET)',
+    '    data = b""',
+    '    while len(data) < limit:',
+    '        chunk = os.read(fd, 65536)',
+    '        if not chunk:',
+    '            break',
+    '        data += chunk',
+    'finally:',
+    '    os.close(fd)',
+    'lines = [l for l in data.split(b"\\n") if l]',
+    'if info.st_size > limit or len(lines) > 500:',
+    '    tmp = path + ".tmp"',
+    '    tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)',
+    '    try:',
+    '        os.write(tfd, b"\\n".join(lines[-200:]) + b"\\n")',
+    '    finally:',
+    '        os.close(tfd)',
+    '    os.replace(tmp, path)'
+  ].join('\n')
+}
+
+// argv[1] = command JSON, argv[2] = command file path. O_EXCL never follows
+// a symlink and never overwrites, so a planted file simply makes the write a
+// no-op instead of redirecting it.
+function commandWritePythonScript() {
+  return [
+    'import os, sys',
+    'payload, path = sys.argv[1], sys.argv[2]',
+    'if len(payload) > 65536:',
+    '    sys.exit(0)',
+    'os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)',
+    'try:',
+    '    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)',
+    'except OSError:',
+    '    sys.exit(0)',
+    'try:',
+    '    os.write(fd, payload.encode())',
+    'finally:',
+    '    os.close(fd)'
+  ].join('\n')
 }
 
 if (typeof module !== "undefined") {
@@ -139,6 +233,8 @@ if (typeof module !== "undefined") {
     uniqueHistoryEntries: uniqueHistoryEntries,
     historyPlaybackDescriptor: historyPlaybackDescriptor,
     parseHistoryLines: parseHistoryLines,
-    historyAppendBashScript: historyAppendBashScript
+    historyLoadPythonScript: historyLoadPythonScript,
+    historyAppendPythonScript: historyAppendPythonScript,
+    commandWritePythonScript: commandWritePythonScript
   }
 }
