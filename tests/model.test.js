@@ -115,6 +115,64 @@ const fs = require("node:fs")
 const os = require("node:os")
 const path = require("node:path")
 
+// Pause a generated worker immediately after its final parent descriptor is
+// pinned. The orchestrator can then replace an intermediate ancestor before
+// allowing the descriptor-relative file operation to continue.
+function withPinnedParentBarrier(script, argumentCount) {
+  const pinned = "dirfd = dirfds[-1]"
+  const markerIndex = argumentCount + 1
+  assert.equal(script.split(pinned).length, 2)
+  return script
+    .replace("import errno, os, stat, sys", "import errno, os, stat, sys, time")
+    .replace(pinned, [
+      pinned,
+      'with open(sys.argv[' + markerIndex + '], "w") as marker:',
+      '    marker.write("ready")',
+      'while not os.path.exists(sys.argv[' + (markerIndex + 1) + ']):',
+      '    time.sleep(0.001)'
+    ].join("\n"))
+}
+
+function runAncestorSwap(script, workerArgs, live, moved, redirect, controlDir, label) {
+  const worker = path.join(controlDir, label + "-worker.py")
+  const marker = path.join(controlDir, label + "-ready")
+  const release = path.join(controlDir, label + "-release")
+  fs.writeFileSync(worker, withPinnedParentBarrier(script, workerArgs.length))
+  const orchestrator = [
+    'import json, os, subprocess, sys, time',
+    'worker, worker_args_json, marker, release, live, moved, redirect = sys.argv[1:]',
+    'worker_args = json.loads(worker_args_json)',
+    'proc = subprocess.Popen(["python3", worker] + worker_args + [marker, release])',
+    'try:',
+    '    deadline = time.time() + 5',
+    '    while not os.path.exists(marker):',
+    '        if proc.poll() is not None:',
+    '            raise RuntimeError("worker exited before pinning parent")',
+    '        if time.time() >= deadline:',
+    '            raise TimeoutError("worker did not pin parent")',
+    '        time.sleep(0.001)',
+    '    os.rename(live, moved)',
+    '    os.symlink(redirect, live)',
+    '    with open(release, "w"):',
+    '        pass',
+    '    status = proc.wait(timeout=5)',
+    '    if status != 0:',
+    '        raise RuntimeError("worker exited with status " + str(status))',
+    'finally:',
+    '    if proc.poll() is None:',
+    '        with open(release, "a"):',
+    '            pass',
+    '        try:',
+    '            proc.wait(timeout=1)',
+    '        except subprocess.TimeoutExpired:',
+    '            proc.kill()',
+    '            proc.wait()'
+  ].join("\n")
+  return execFileSync("python3", ["-c", orchestrator, worker,
+    JSON.stringify(workerArgs), marker, release, live, moved, redirect],
+    { stdio: "pipe", timeout: 10000 }).toString()
+}
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "am-model-test-"))
 try {
   const historyFile = path.join(tmp, "state", "history.jsonl")
@@ -153,6 +211,25 @@ try {
   assert.equal(fs.readFileSync(parentVictimHistory, "utf8"), "untouched\n")
   assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), redirectedHistory]).toString(), "")
 
+  // A symlink earlier in the parent chain must also be rejected. In
+  // particular, history access must not repair permissions on the self-owned
+  // directory reached through that unverified chain.
+  const intermediateRoot = path.join(tmp, "intermediate-root")
+  const intermediateVictim = path.join(tmp, "intermediate-victim")
+  const intermediateVictimParent = path.join(intermediateVictim, "state")
+  fs.mkdirSync(intermediateRoot)
+  fs.mkdirSync(intermediateVictimParent, { recursive: true })
+  fs.chmodSync(intermediateVictimParent, 0o755)
+  const intermediateVictimHistory = path.join(intermediateVictimParent, "history.jsonl")
+  fs.writeFileSync(intermediateVictimHistory, "still untouched\n")
+  const intermediateLink = path.join(intermediateRoot, "redirect")
+  fs.symlinkSync(intermediateVictim, intermediateLink)
+  const intermediateHistory = path.join(intermediateLink, "state", "history.jsonl")
+  assert.throws(() => execFileSync("python3", ["-c", model.historyAppendPythonScript(), entry, intermediateHistory], { stdio: "pipe" }))
+  assert.equal(fs.readFileSync(intermediateVictimHistory, "utf8"), "still untouched\n")
+  assert.equal(fs.statSync(intermediateVictimParent).mode & 0o777, 0o755)
+  assert.equal(execFileSync("python3", ["-c", model.historyLoadPythonScript(), intermediateHistory]).toString(), "")
+
   // Command write: creates exclusively, refuses to overwrite or follow links.
   const cmdFile = path.join(tmp, "cmds", "cmd-1.json")
   execFileSync("python3", ["-c", model.commandWritePythonScript(), '{"action":"rate"}', cmdFile])
@@ -163,6 +240,81 @@ try {
   fs.symlinkSync(victim, cmdLink)
   execFileSync("python3", ["-c", model.commandWritePythonScript(), '{"action":"evil"}', cmdLink])
   assert.equal(fs.readFileSync(victim, "utf8"), "untouched\n")
+
+  // Command creation also rejects symlinks earlier in its parent chain.
+  const commandVictim = path.join(tmp, "command-victim")
+  const commandVictimParent = path.join(commandVictim, "commands")
+  fs.mkdirSync(commandVictimParent, { recursive: true })
+  const commandLink = path.join(intermediateRoot, "command-redirect")
+  fs.symlinkSync(commandVictim, commandLink)
+  const intermediateCommand = path.join(commandLink, "commands", "cmd-3.json")
+  execFileSync("python3", ["-c", model.commandWritePythonScript(), '{"action":"evil"}', intermediateCommand])
+  assert.equal(fs.existsSync(path.join(commandVictimParent, "cmd-3.json")), false)
+
+  // Once the history parent is pinned, replacing an intermediate ancestor
+  // redirects the pathname but not the append operation or permission repair.
+  const historyRaceRoot = path.join(tmp, "history-race")
+  const historyRaceLive = path.join(historyRaceRoot, "live")
+  const historyRaceMoved = path.join(historyRaceRoot, "moved")
+  const historyRaceRedirect = path.join(historyRaceRoot, "redirect")
+  const historyRaceOriginalParent = path.join(historyRaceLive, "state")
+  const historyRaceRedirectParent = path.join(historyRaceRedirect, "state")
+  fs.mkdirSync(historyRaceOriginalParent, { recursive: true })
+  fs.mkdirSync(historyRaceRedirectParent, { recursive: true })
+  fs.chmodSync(historyRaceOriginalParent, 0o700)
+  fs.chmodSync(historyRaceRedirectParent, 0o755)
+  const raceEntry = JSON.stringify({ ts: 700, title: "Pinned history" })
+  const historyRaceFile = path.join(historyRaceOriginalParent, "history.jsonl")
+  const historyRaceRedirectFile = path.join(historyRaceRedirectParent, "history.jsonl")
+  const raceBulk = Array.from({ length: 600 }, (_, i) =>
+    JSON.stringify({ ts: i, title: "race-" + i })).join("\n") + "\n"
+  fs.writeFileSync(historyRaceFile, raceBulk)
+  fs.writeFileSync(historyRaceRedirectFile, "redirect untouched\n")
+  runAncestorSwap(model.historyAppendPythonScript(), [raceEntry,
+    path.join(historyRaceLive, "state", "history.jsonl")], historyRaceLive,
+    historyRaceMoved, historyRaceRedirect, tmp, "history-race")
+  const raceTrimmed = fs.readFileSync(path.join(historyRaceMoved, "state", "history.jsonl"), "utf8").trim().split("\n")
+  assert.equal(raceTrimmed.length, 200)
+  assert.equal(JSON.parse(raceTrimmed[raceTrimmed.length - 1]).title, "Pinned history")
+  assert.equal(fs.readFileSync(historyRaceRedirectFile, "utf8"), "redirect untouched\n")
+  assert.equal(fs.statSync(historyRaceRedirectParent).mode & 0o777, 0o755)
+
+  // Loading also reads from the pinned parent after an ancestor swap, never
+  // from the replacement path now visible under the original pathname.
+  const loadRaceRoot = path.join(tmp, "load-race")
+  const loadRaceLive = path.join(loadRaceRoot, "live")
+  const loadRaceMoved = path.join(loadRaceRoot, "moved")
+  const loadRaceRedirect = path.join(loadRaceRoot, "redirect")
+  fs.mkdirSync(path.join(loadRaceLive, "state"), { recursive: true })
+  fs.mkdirSync(path.join(loadRaceRedirect, "state"), { recursive: true })
+  fs.chmodSync(path.join(loadRaceLive, "state"), 0o700)
+  fs.chmodSync(path.join(loadRaceRedirect, "state"), 0o755)
+  fs.writeFileSync(path.join(loadRaceLive, "state", "history.jsonl"), "original history\n")
+  fs.writeFileSync(path.join(loadRaceRedirect, "state", "history.jsonl"), "redirect history\n")
+  const racedLoad = runAncestorSwap(model.historyLoadPythonScript(),
+    [path.join(loadRaceLive, "state", "history.jsonl")], loadRaceLive,
+    loadRaceMoved, loadRaceRedirect, tmp, "load-race")
+  assert.equal(racedLoad, "original history\n")
+  assert.equal(fs.readFileSync(path.join(loadRaceRedirect, "state", "history.jsonl"), "utf8"), "redirect history\n")
+  assert.equal(fs.statSync(path.join(loadRaceRedirect, "state")).mode & 0o777, 0o755)
+
+  // Command creation likewise stays inside its pinned directory after an
+  // intermediate ancestor is replaced with a symlink.
+  const commandRaceRoot = path.join(tmp, "command-race")
+  const commandRaceLive = path.join(commandRaceRoot, "live")
+  const commandRaceMoved = path.join(commandRaceRoot, "moved")
+  const commandRaceRedirect = path.join(commandRaceRoot, "redirect")
+  fs.mkdirSync(path.join(commandRaceLive, "commands"), { recursive: true })
+  fs.mkdirSync(path.join(commandRaceRedirect, "commands"), { recursive: true })
+  fs.chmodSync(path.join(commandRaceLive, "commands"), 0o700)
+  fs.chmodSync(path.join(commandRaceRedirect, "commands"), 0o755)
+  const raceCommand = '{"action":"pinned"}'
+  runAncestorSwap(model.commandWritePythonScript(), [raceCommand,
+    path.join(commandRaceLive, "commands", "cmd-race.json")], commandRaceLive,
+    commandRaceMoved, commandRaceRedirect, tmp, "command-race")
+  assert.equal(fs.readFileSync(path.join(commandRaceMoved, "commands", "cmd-race.json"), "utf8"), raceCommand)
+  assert.equal(fs.existsSync(path.join(commandRaceRedirect, "commands", "cmd-race.json")), false)
+  assert.equal(fs.statSync(path.join(commandRaceRedirect, "commands")).mode & 0o777, 0o755)
 
   // Trim: >500 lines collapses to the newest 200.
   const trimFile = path.join(tmp, "trim.jsonl")

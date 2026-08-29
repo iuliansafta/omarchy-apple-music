@@ -142,32 +142,70 @@ function parseHistoryLines(text, cap) {
   return uniqueHistoryEntries(entries, cap)
 }
 
-// File I/O below runs as `python3 -c <script> <args...>`. The history parent
-// is pinned as a self-owned 0700 directory, then every bounded file operation
-// is relative to that descriptor and verifies a self-owned regular final
-// component opened with O_NOFOLLOW|O_NONBLOCK. Parent replacement, symlinks,
-// and FIFOs can therefore neither redirect nor block history I/O.
+// File I/O below runs as `python3 -c <script> <args...>`. Absolute parent
+// paths are traversed one component at a time from the trusted root descriptor.
+// Every directory is opened with O_DIRECTORY|O_NOFOLLOW and kept open, so an
+// ancestor replacement cannot redirect later operations away from the pinned
+// final parent. Only that fully verified, self-owned parent may be repaired to
+// 0700. Final file operations remain descriptor-relative and no-follow.
+function secureParentPythonLines() {
+  return [
+    '_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC',
+    'def open_parent(path, create):',
+    '    if not os.path.isabs(path):',
+    '        raise OSError(errno.EINVAL, "path must be absolute")',
+    '    parts = path.split(os.sep)',
+    '    if not parts[-1] or any(not part or part in (".", "..") for part in parts[1:]):',
+    '        raise OSError(errno.EINVAL, "unsafe path component")',
+    '    dirfds = []',
+    '    try:',
+    '        dirfds.append(os.open(os.sep, _DIR_FLAGS))',
+    '        for component in parts[1:-1]:',
+    '            try:',
+    '                nextfd = os.open(component, _DIR_FLAGS, dir_fd=dirfds[-1])',
+    '            except FileNotFoundError:',
+    '                if not create:',
+    '                    raise',
+    '                try:',
+    '                    os.mkdir(component, 0o700, dir_fd=dirfds[-1])',
+    '                except FileExistsError:',
+    '                    pass',
+    '                nextfd = os.open(component, _DIR_FLAGS, dir_fd=dirfds[-1])',
+    '            dirfds.append(nextfd)',
+    '        return dirfds, parts[-1]',
+    '    except BaseException:',
+    '        for fd in reversed(dirfds):',
+    '            os.close(fd)',
+    '        raise',
+    'def close_dirs(dirfds):',
+    '    for fd in reversed(dirfds):',
+    '        os.close(fd)',
+    'def ensure_private_dir(dirfd):',
+    '    info = os.fstat(dirfd)',
+    '    if info.st_uid != os.geteuid():',
+    '        return False',
+    '    if stat.S_IMODE(info.st_mode) != 0o700:',
+    '        os.fchmod(dirfd, 0o700)',
+    '        info = os.fstat(dirfd)',
+    '    return info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700'
+  ]
+}
 
 // argv[1] = history path. Prints at most the last 1 MiB of the file; a
 // missing/unreadable/foreign file prints nothing (empty history, no error).
 function historyLoadPythonScript() {
   return [
-    'import os, stat, sys',
-    'parent, name = os.path.split(sys.argv[1])',
-    'if not parent or not name:',
-    '    sys.exit(0)',
+    'import errno, os, stat, sys'
+  ].concat(secureParentPythonLines(), [
+    'path = sys.argv[1]',
     'try:',
-    '    dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)',
+    '    dirfds, name = open_parent(path, False)',
     'except OSError:',
     '    sys.exit(0)',
+    'dirfd = dirfds[-1]',
     'try:',
-    '    dinfo = os.fstat(dirfd)',
-    '    if dinfo.st_uid != os.geteuid():',
+    '    if not ensure_private_dir(dirfd):',
     '        sys.exit(0)',
-    '    if stat.S_IMODE(dinfo.st_mode) != 0o700:',
-    '        os.fchmod(dirfd, 0o700)',
-    '        if stat.S_IMODE(os.fstat(dirfd).st_mode) != 0o700:',
-    '            sys.exit(0)',
     '    try:',
     '        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)',
     '    except OSError:',
@@ -189,31 +227,24 @@ function historyLoadPythonScript() {
     '    finally:',
     '        os.close(fd)',
     'finally:',
-    '    os.close(dirfd)'
-  ].join('\n')
+    '    close_dirs(dirfds)'
+  ]).join('\n')
 }
 
 // argv[1] = entry JSON line, argv[2] = history path. Appends one line, then
 // trims the file to its newest 200 lines once it exceeds 500 lines (or 1 MiB).
 function historyAppendPythonScript() {
   return [
-    'import os, stat, sys',
+    'import errno, os, stat, sys'
+  ].concat(secureParentPythonLines(), [
     'entry, path = sys.argv[1], sys.argv[2]',
     'if len(entry) > 65536 or "\\n" in entry:',
     '    sys.exit(0)',
-    'parent, name = os.path.split(path)',
-    'if not parent or not name:',
-    '    sys.exit(0)',
-    'os.makedirs(parent, mode=0o700, exist_ok=True)',
-    'dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)',
+    'dirfds, name = open_parent(path, True)',
+    'dirfd = dirfds[-1]',
     'try:',
-    '    dinfo = os.fstat(dirfd)',
-    '    if dinfo.st_uid != os.geteuid():',
+    '    if not ensure_private_dir(dirfd):',
     '        sys.exit(0)',
-    '    if stat.S_IMODE(dinfo.st_mode) != 0o700:',
-    '        os.fchmod(dirfd, 0o700)',
-    '        if stat.S_IMODE(os.fstat(dirfd).st_mode) != 0o700:',
-    '            sys.exit(0)',
     '    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dirfd)',
     '    try:',
     '        info = os.fstat(fd)',
@@ -255,29 +286,38 @@ function historyAppendPythonScript() {
     '            except FileNotFoundError:',
     '                pass',
     'finally:',
-    '    os.close(dirfd)'
-  ].join('\n')
+    '    close_dirs(dirfds)'
+  ]).join('\n')
 }
 
-// argv[1] = command JSON, argv[2] = command file path. O_EXCL never follows
-// a symlink and never overwrites, so a planted file simply makes the write a
-// no-op instead of redirecting it.
+// argv[1] = command JSON, argv[2] = command file path. The private parent is
+// pinned first; O_EXCL then refuses a planted final entry without redirecting.
 function commandWritePythonScript() {
   return [
-    'import os, sys',
+    'import errno, os, stat, sys'
+  ].concat(secureParentPythonLines(), [
     'payload, path = sys.argv[1], sys.argv[2]',
     'if len(payload) > 65536:',
     '    sys.exit(0)',
-    'os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)',
     'try:',
-    '    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)',
+    '    dirfds, name = open_parent(path, True)',
     'except OSError:',
     '    sys.exit(0)',
+    'dirfd = dirfds[-1]',
     'try:',
-    '    os.write(fd, payload.encode())',
+    '    if not ensure_private_dir(dirfd):',
+    '        sys.exit(0)',
+    '    try:',
+    '        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)',
+    '    except OSError:',
+    '        sys.exit(0)',
+    '    try:',
+    '        os.write(fd, payload.encode())',
+    '    finally:',
+    '        os.close(fd)',
     'finally:',
-    '    os.close(fd)'
-  ].join('\n')
+    '    close_dirs(dirfds)'
+  ]).join('\n')
 }
 
 if (typeof module !== "undefined") {
