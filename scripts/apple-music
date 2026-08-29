@@ -64,8 +64,14 @@ install_launcher() {
   mkdir -p "$(dirname "$DESKTOP_FILE")" "$ICON_DIR"
   cp "$ICON_SOURCE" "$ICON_FILE"
 
-  local escaped_script=${SCRIPT_DIR//\\/\\\\}
-  escaped_script=${escaped_script//\"/\\\"}
+  # Desktop entry values are unescaped once as strings and again as quoted
+  # Exec arguments. Backslashes therefore need four escapes; quotes, backticks,
+  # and dollars need two. Percent is doubled so it cannot become a field code.
+  local escaped_script=${SCRIPT_DIR//\\/\\\\\\\\}
+  escaped_script=${escaped_script//\"/\\\\\"}
+  escaped_script=${escaped_script//\`/\\\\\`}
+  escaped_script=${escaped_script//\$/\\\\\$}
+  escaped_script=${escaped_script//\%/%%}
   cat >"$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Version=1.0

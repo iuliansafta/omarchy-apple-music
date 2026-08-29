@@ -18,6 +18,7 @@ Only the Python standard library is used; the WebSocket client is hand-rolled
 """
 
 import base64
+import errno
 import json
 import os
 import re
@@ -44,6 +45,10 @@ MAX_UPNEXT_ENTRIES = 40
 
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9._-]+\.json$")
 DESCRIPTOR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# The dedicated window is *expected* to sit on music.apple.com, but a
+# prefix test would also accept music.apple.com.evil.test; the host must end
+# at a delimiter.
+PAGE_URL = re.compile(r"^https://music\.apple\.com(?:[/?#]|\Z)")
 
 
 class ProtocolError(Exception):
@@ -214,7 +219,7 @@ def find_page_target(port):
     for target in targets:
         if not isinstance(target, dict):
             continue
-        if target.get("type") == "page" and str(target.get("url", "")).startswith("https://music.apple.com"):
+        if target.get("type") == "page" and PAGE_URL.match(str(target.get("url", ""))):
             ws_url = target.get("webSocketDebuggerUrl")
             # Only ever dial back to loopback, no matter what the endpoint
             # claims.
@@ -242,22 +247,46 @@ def connect(profile_dir):
 
 
 def open_private_dir(path):
-    """Create (0700) and pin a private directory: the returned fd refers to a
-    real directory (no symlink at the final component) owned by this user,
-    with group/other access stripped. All command file operations go through
-    this fd so the directory cannot be swapped underneath the daemon."""
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    """Create and pin a self-owned 0700 directory without following any
+    component symlinks. Traversal starts at the trusted root descriptor, and
+    every missing component is created relative to its pinned parent."""
+    if not os.path.isabs(path):
+        raise OSError(errno.EINVAL, "path must be absolute")
+    parts = path.split(os.sep)
+    if not parts[-1] or any(not part or part in (".", "..") for part in parts[1:]):
+        raise OSError(errno.EINVAL, "unsafe path component")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    dirfds = []
     try:
-        info = os.fstat(fd)
+        dirfds.append(os.open(os.sep, flags))
+        for component in parts[1:]:
+            try:
+                nextfd = os.open(component, flags, dir_fd=dirfds[-1])
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=dirfds[-1])
+                except FileExistsError:
+                    pass
+                nextfd = os.open(component, flags, dir_fd=dirfds[-1])
+            dirfds.append(nextfd)
+
+        info = os.fstat(dirfds[-1])
         if info.st_uid != os.geteuid():
             raise ProtocolError("commands dir owned by another user")
-        if info.st_mode & 0o077:
-            os.fchmod(fd, 0o700)
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.fchmod(dirfds[-1], 0o700)
+            info = os.fstat(dirfds[-1])
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ProtocolError("commands dir is not private")
     except (OSError, ProtocolError):
-        os.close(fd)
+        for fd in reversed(dirfds):
+            os.close(fd)
         raise
-    return fd
+
+    for fd in reversed(dirfds[:-1]):
+        os.close(fd)
+    return dirfds[-1]
 
 
 def read_command_file(dirfd, name):

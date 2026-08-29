@@ -163,6 +163,19 @@ class OpenPrivateDirTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 bridge_daemon.open_private_dir(link)
 
+    def test_rejects_intermediate_symlink_without_tightening_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "root")
+            victim_commands = os.path.join(tmp, "victim", "commands")
+            os.mkdir(root)
+            os.makedirs(victim_commands)
+            os.chmod(victim_commands, 0o755)
+            os.symlink(os.path.join(tmp, "victim"), os.path.join(root, "redirect"))
+
+            with self.assertRaises(OSError):
+                bridge_daemon.open_private_dir(os.path.join(root, "redirect", "commands"))
+            self.assertEqual(stat.S_IMODE(os.stat(victim_commands).st_mode), 0o755)
+
 
 class FrameLimitTest(unittest.TestCase):
     def test_oversized_declared_frame_rejected_before_buffering(self):
@@ -194,6 +207,30 @@ class CloseClientTest(unittest.TestCase):
 
     def test_none_is_safe(self):
         self.assertIsNone(bridge_daemon.close_client(None))
+
+
+class PageUrlTest(unittest.TestCase):
+    def test_canonical_urls_match(self):
+        for url in (
+            "https://music.apple.com",
+            "https://music.apple.com/",
+            "https://music.apple.com/us/browse",
+            "https://music.apple.com/?l=en",
+            "https://music.apple.com#now",
+        ):
+            self.assertTrue(bridge_daemon.PAGE_URL.match(url), url)
+
+    def test_lookalike_hosts_and_schemes_rejected(self):
+        for url in (
+            "https://music.apple.com.evil.test/",
+            "https://music.apple.comx/",
+            "https://music.apple.com:8443/",
+            "http://music.apple.com/",
+            "https://evil.test/https://music.apple.com",
+            "https://music.apple.com\n",
+            "",
+        ):
+            self.assertIsNone(bridge_daemon.PAGE_URL.match(url), url)
 
 
 if __name__ == "__main__":
