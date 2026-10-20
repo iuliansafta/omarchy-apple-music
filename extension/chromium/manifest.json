@@ -2,8 +2,18 @@
   "manifest_version": 3,
   "name": "Omarchy Apple Music Bridge",
   "version": "0.2.0",
-  "description": "Bridges Apple Music Web state (duration, rating, queue) to the Omarchy bar and relays bar commands into the page.",
+  "description": "Bridges Apple Music Web state (duration, rating, queue) to the Omarchy bar, relays bar commands into the page, and applies the Omarchy theme.",
   "content_scripts": [
+    {
+      "matches": [
+        "https://music.apple.com/*"
+      ],
+      "js": [
+        "theme-early.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://music.apple.com/*"

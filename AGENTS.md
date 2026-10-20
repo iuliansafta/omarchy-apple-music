@@ -45,6 +45,7 @@ journalctl --user --since "2 minutes ago" | grep -Ei 'apple-music|qml.*(error|wa
 - `Mpris.players.values` is a QML sequence, not a JS `Array`. `Array.isArray()` is unreliable on it; `Model.selectPlayer` iterates by index. Don't "fix" it to use array methods.
 - The Chromium profile is isolated at `~/.local/share/omarchy-apple-music/chromium-profile`, separate from the user's normal Chromium. `playerctl` is not required.
 - Ratings and queue data bypass MPRIS: the extension exposes `window.__omarchyAppleMusic` on the page, and `scripts/bridge-daemon` (python3 stdlib, spawned by the service) relays state/commands over Chromium's DevTools protocol (the launcher passes `--remote-debugging-port=0`; the port comes from `DevToolsActivePort` in the profile dir). The service trusts bridge state only while its `trackTitle` matches MPRIS's, and sends commands as JSON files under `~/.local/share/omarchy-apple-music/bridge-commands/` that the daemon consumes.
+- Theming: the service passes `~/.local/state/omarchy/current/theme/colors.toml` to the daemon, which hands its hex colors to `applyTheme()` on every poll. `themeCss()` in `duration-bridge.js` maps Omarchy roles onto Apple's `:root` color variables (`THEME_VARIABLES`); `theme-early.js` replays the cached stylesheet at `document_start` so reloads don't flash Apple's grey.
 
 ## Bar widget conventions
 

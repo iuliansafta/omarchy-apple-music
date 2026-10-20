@@ -578,6 +578,125 @@ function handleCommand(payload) {
   }
 }
 
+// Omarchy colors.toml roles a theme may omit, and the role each falls back
+// to. background, foreground, and accent have no fallback: a palette without
+// them is not themed at all.
+var THEME_FALLBACKS = {
+  dark_background: "background",
+  lighter_background: "background",
+  dark_foreground: "foreground",
+  muted: "dark_foreground",
+  selection: "lighter_background"
+}
+
+// Apple Music Web's semantic color variables, all defined on :root, and the
+// Omarchy role + opacity each one takes. Artwork-derived colors (album
+// headers, the now-playing backdrop) are deliberately left to Apple.
+var THEME_VARIABLES = [
+  ["--pageBG", "background", 1],
+  ["--fallbackMaterialBG", "background", 0.97],
+  ["--systemHeaderMaterialSover", "background", 0.8],
+  ["--navSidebarBG", "dark_background", 1],
+  ["--footerBg", "dark_background", 1],
+  ["--navSidebarSelectedState", "selection", 1],
+  ["--playerBackground", "lighter_background", 0.88],
+  ["--playerBackgroundFallback", "lighter_background", 0.97],
+  ["--miniPlayerBackground", "lighter_background", 0.9],
+  ["--playerMissingArtworkBg", "lighter_background", 1],
+  ["--glassMaterialBackground", "lighter_background", 0.6],
+  ["--systemToolbarTitlebarMaterialSover", "lighter_background", 0.8],
+  ["--systemStandardUltrathinMaterialSover", "lighter_background", 0.4],
+  ["--systemStandardThinMaterialSover", "lighter_background", 0.5],
+  ["--systemStandardMediumMaterialSover", "lighter_background", 0.6],
+  ["--systemStandardThickMaterialSover", "lighter_background", 0.7],
+  ["--systemStandardUltrathickMaterialSover", "lighter_background", 0.8],
+  ["--opaqueShelfBG", "lighter_background", 1],
+  ["--lyricsBg", "lighter_background", 1],
+  ["--systemGroupedBackgroundSecondary", "lighter_background", 1],
+  ["--dropdownBackground", "lighter_background", 1],
+  ["--modalCloseButtonBGColor", "lighter_background", 1],
+  ["--systemPrimary", "foreground", 1],
+  ["--contextMenuTextColor", "foreground", 1],
+  ["--systemSecondary", "dark_foreground", 1],
+  ["--systemTertiary", "muted", 1],
+  ["--systemQuaternary", "foreground", 0.1],
+  ["--labelDivider", "foreground", 0.1],
+  ["--contextMenuBorderColor", "foreground", 0.1],
+  ["--searchBarBorderColor", "foreground", 0.15],
+  ["--shelfBG", "foreground", 0.05],
+  ["--trackBackgroundEven", "foreground", 0.04],
+  ["--tracklistHoverColor", "foreground", 0.06],
+  ["--keyColor", "accent", 1],
+  ["--keyColor-rollover", "accent", 1],
+  ["--keyColor-pressed", "accent", 1],
+  ["--keyColor-deepPressed", "accent", 1],
+  ["--keyColor-disabled", "accent", 0.35],
+  ["--keyColorBG", "accent", 1]
+]
+
+var THEME_STYLE_ID = "omarchy-apple-music-theme"
+var HEX_COLOR = /^#[0-9a-fA-F]{6}$/
+
+function themeRole(colors, role) {
+  for (var key = role; key; key = THEME_FALLBACKS[key]) {
+    if (HEX_COLOR.test(colors[key])) return colors[key]
+  }
+  return null
+}
+
+function withAlpha(hex, alpha) {
+  if (alpha >= 1) return hex
+  return hex + Math.round(alpha * 255).toString(16).padStart(2, "0")
+}
+
+function hexTriplet(hex) {
+  return [1, 3, 5].map(function(start) { return parseInt(hex.substr(start, 2), 16) }).join(",")
+}
+
+// Builds the override stylesheet from an Omarchy colors.toml dictionary, or
+// returns "" when the palette lacks a base role.
+function themeCss(colors) {
+  if (!colors || typeof colors !== "object") return ""
+  var lines = []
+  if (colors.mode === "dark" || colors.mode === "light") {
+    lines.push("  color-scheme: " + colors.mode + " !important;")
+  }
+  for (var i = 0; i < THEME_VARIABLES.length; i++) {
+    var name = THEME_VARIABLES[i][0]
+    var alpha = THEME_VARIABLES[i][2]
+    var color = themeRole(colors, THEME_VARIABLES[i][1])
+    if (!color) return ""
+    lines.push("  " + name + ": " + withAlpha(color, alpha) + " !important;")
+    // Apple composes focus rings and scrims as rgba(var(--keyColor-rgb), a).
+    if (alpha >= 1) lines.push("  " + name + "-rgb: " + hexTriplet(color) + " !important;")
+  }
+  return ":root {\n" + lines.join("\n") + "\n}\n"
+}
+
+// Called by the bridge daemon on every poll, so it must be cheap when the
+// theme is unchanged and must converge after a page reload. The stylesheet is
+// cached for theme-early.js, which applies it before first paint.
+function applyTheme(colors) {
+  try {
+    var css = themeCss(colors)
+    var style = document.getElementById(THEME_STYLE_ID)
+    if (!css) {
+      if (style) style.remove()
+      localStorage.removeItem(THEME_STYLE_ID)
+      return
+    }
+    if (!style) {
+      style = document.createElement("style")
+      style.id = THEME_STYLE_ID
+      document.head.appendChild(style)
+    }
+    if (style.textContent !== css) {
+      style.textContent = css
+      localStorage.setItem(THEME_STYLE_ID, css)
+    }
+  } catch (_) {}
+}
+
 if (typeof window !== "undefined" && typeof document !== "undefined") {
   setInterval(bridgeAppleMusicDuration, 1000)
   document.addEventListener("visibilitychange", bridgeAppleMusicDuration)
@@ -586,7 +705,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   if (!window.__omarchyAppleMusic) {
     window.__omarchyAppleMusic = {
       collect: collectBridgeState,
-      command: handleCommand
+      command: handleCommand,
+      applyTheme: applyTheme
     }
   }
 }
@@ -617,6 +737,7 @@ if (typeof module !== "undefined") {
     queueContext: queueContext,
     upNextEntries: upNextEntries,
     collectBridgeState: collectBridgeState,
-    handleCommand: handleCommand
+    handleCommand: handleCommand,
+    themeCss: themeCss
   }
 }

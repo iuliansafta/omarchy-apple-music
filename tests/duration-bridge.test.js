@@ -271,6 +271,41 @@ function searchResponse(hits) {
 }
 const flush = function() { return new Promise(function(resolve) { setImmediate(resolve) }) }
 
+// The Apple Music window follows the Omarchy theme: page, text, and accent
+// come from colors.toml roles.
+const fireside = {
+  mode: "dark",
+  background: "#0a1220",
+  dark_background: "#080e18",
+  lighter_background: "#111f37",
+  foreground: "#f0f2f5",
+  dark_foreground: "#b3bdcc",
+  accent: "#b8b8b6",
+  muted: "#5a606b",
+  selection: "#111f37"
+}
+const firesideCss = bridge.themeCss(fireside)
+assert.match(firesideCss, /--pageBG: #0a1220 !important;/)
+assert.match(firesideCss, /--systemPrimary: #f0f2f5 !important;/)
+assert.match(firesideCss, /--keyColor: #b8b8b6 !important;/)
+assert.match(firesideCss, /--playerBackground: #111f37e0 !important;/)
+// Focus rings are rgba(var(--keyColor-rgb), .6); without the triplet they stay Apple red.
+assert.match(firesideCss, /--keyColor-rgb: 184,184,182 !important;/)
+assert.match(firesideCss, /color-scheme: dark !important;/)
+
+// A theme that ships only the base roles still themes every surface instead
+// of leaving Apple's grey on the ones it omits.
+const minimalCss = bridge.themeCss({ background: "#ffffff", foreground: "#111111", accent: "#3366cc" })
+assert.match(minimalCss, /--navSidebarBG: #ffffff !important;/)
+assert.match(minimalCss, /--systemTertiary: #111111 !important;/)
+assert.doesNotMatch(minimalCss, /color-scheme/)
+
+// Without a base role, or with a value that is not a plain hex color, the page
+// keeps Apple's own look rather than a half-themed or injected stylesheet.
+assert.equal(bridge.themeCss({ background: "#000000", foreground: "#ffffff" }), "")
+assert.equal(bridge.themeCss(Object.assign({}, fireside, { accent: "red; } body { display: none" })), "")
+assert.equal(bridge.themeCss(null), "")
+
 ;(async function() {
   // Queue-backed stub so collectBridgeState's current-track gating sees the
   // item under test (Media Session metadata is absent in Node, so the queue
