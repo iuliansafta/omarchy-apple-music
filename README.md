@@ -23,6 +23,7 @@ The plugin keeps authentication, DRM, library access, and playback in the offici
 - Recently played entries replay the exact song (old entries keep working)
 - Add the current song to the Apple Music library, with truthful state
 - Player panel with a blurred artwork backdrop
+- Apple Music window follows the current Omarchy theme colors, live on theme switch
 
 ## Requirements
 

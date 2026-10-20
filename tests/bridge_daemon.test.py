@@ -233,5 +233,33 @@ class PageUrlTest(unittest.TestCase):
             self.assertIsNone(bridge_daemon.PAGE_URL.match(url), url)
 
 
+class ReadThemeTest(unittest.TestCase):
+    def write(self, text):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
+        handle.write(text)
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_forwards_hex_colors_and_mode(self):
+        path = self.write('mode = "light"\naccent = "#b8b8b6"\nbackground = "#0a1220"\n')
+        self.assertEqual(
+            bridge_daemon.read_theme(path),
+            {"mode": "light", "accent": "#b8b8b6", "background": "#0a1220"},
+        )
+
+    def test_drops_values_that_are_not_plain_hex(self):
+        # The page builds a stylesheet from these values.
+        path = self.write('accent = "red; } body { display: none"\nbackground = "#0a1220"\n'
+                          'mode = "sepia"\nopacity = 0.9\n')
+        self.assertEqual(bridge_daemon.read_theme(path), {"background": "#0a1220"})
+
+    def test_missing_or_broken_file_means_no_theme(self):
+        # No theme means the page drops its overrides and shows Apple's look.
+        self.assertIsNone(bridge_daemon.read_theme(None))
+        self.assertIsNone(bridge_daemon.read_theme("/nonexistent/colors.toml"))
+        self.assertIsNone(bridge_daemon.read_theme(self.write('background = "#0a1220\n')))
+
+
 if __name__ == "__main__":
     unittest.main()

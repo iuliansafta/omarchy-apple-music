@@ -9,9 +9,12 @@ DevTools protocol:
   - once per second it evaluates collect() and prints the result as one JSON
     line on stdout ({"ok": false} when no browser/page/bridge is available);
   - it polls COMMANDS_DIR for *.json command payloads, evaluates
-    command(payload) in the page, and deletes the file after execution.
+    command(payload) in the page, and deletes the file after execution;
+  - when given THEME_FILE (Omarchy's colors.toml), it hands the palette to
+    applyTheme() on every poll, so the page follows theme switches and
+    reloads without any change tracking here.
 
-Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR
+Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR [THEME_FILE]
 
 Only the Python standard library is used; the WebSocket client is hand-rolled
 (no CDP library ships with Python).
@@ -27,6 +30,7 @@ import stat
 import struct
 import sys
 import time
+import tomllib
 import urllib.request
 
 POLL_INTERVAL = 1.0
@@ -42,7 +46,9 @@ MAX_WS_MESSAGE_BYTES = 1024 * 1024   # one CDP message (frames + fragments)
 MAX_COMMAND_BYTES = 64 * 1024        # one *.json command file
 MAX_STATE_STRING = 512               # any string forwarded to the shell
 MAX_UPNEXT_ENTRIES = 40
+MAX_THEME_BYTES = 64 * 1024
 
+HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9._-]+\.json$")
 DESCRIPTOR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The dedicated window is *expected* to sit on music.apple.com, but a
@@ -445,6 +451,32 @@ def sanitize_state(value):
     return state
 
 
+def read_theme(path):
+    """Return the hex colors and mode from an Omarchy colors.toml, or None.
+    Role selection and fallbacks live in the extension's themeCss()."""
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.loads(handle.read(MAX_THEME_BYTES).decode())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    theme = {key: value for key, value in data.items()
+             if isinstance(value, str) and HEX_COLOR.match(value)}
+    if data.get("mode") in ("dark", "light"):
+        theme["mode"] = data["mode"]
+    return theme or None
+
+
+def collect_expression(theme):
+    # applyTheme is guarded: a browser still running an older copy of the
+    # extension must keep reporting state.
+    return (
+        "(b => b ? (b.applyTheme && b.applyTheme(" + json.dumps(theme) + "), b.collect()) : null)"
+        "(window.__omarchyAppleMusic)"
+    )
+
+
 def close_client(client):
     """Close a CdpClient (if any) and return None so callers can clear their
     slot and rediscover a fresh port/page target on the next loop."""
@@ -454,10 +486,11 @@ def close_client(client):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR", file=sys.stderr)
+    if len(sys.argv) not in (3, 4):
+        print("Usage: bridge-daemon PROFILE_DIR COMMANDS_DIR [THEME_FILE]", file=sys.stderr)
         return 2
     profile_dir, commands_dir = sys.argv[1], sys.argv[2]
+    theme_file = sys.argv[3] if len(sys.argv) == 4 else None
     try:
         commands_fd = open_private_dir(commands_dir)
     except (OSError, ProtocolError) as error:
@@ -472,9 +505,7 @@ def main():
         state = {"ok": False}
         if client is not None:
             try:
-                value = client.evaluate(
-                    "window.__omarchyAppleMusic ? window.__omarchyAppleMusic.collect() : null"
-                )
+                value = client.evaluate(collect_expression(read_theme(theme_file)))
                 state = sanitize_state(value)
                 consume_commands(client, commands_fd, attempts)
             except ProtocolError as error:

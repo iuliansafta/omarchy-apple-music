@@ -30,6 +30,9 @@ Item {
   readonly property string historyPath: dataRoot + "/history.jsonl"
   readonly property string bridgeDaemonPath:
     Qt.resolvedUrl("scripts/bridge-daemon").toString().replace(/^file:\/\//, "")
+  // Same location Omarchy's Color singleton reads; it ignores XDG_STATE_HOME.
+  readonly property string themeColorsPath:
+    Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
   // Playback modes from the bridge (MusicKit is the single authoritative
   // source). null/"unknown" means the real state is unavailable — the UI
   // must never render that as a definite off.
@@ -277,7 +280,7 @@ Item {
 
   Process {
     id: bridgeDaemon
-    command: ["python3", root.bridgeDaemonPath, root.profileDir, root.bridgeCommandsDir]
+    command: ["python3", root.bridgeDaemonPath, root.profileDir, root.bridgeCommandsDir, root.themeColorsPath]
     running: true
     onExited: function(exitCode, exitStatus) {
       console.warn("iuliansafta.apple-music bridge-daemon exited:", exitCode, exitStatus)
