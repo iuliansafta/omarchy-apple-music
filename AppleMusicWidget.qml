@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Effects
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "AppleMusicModel.js" as Model
 
@@ -35,7 +36,7 @@ BarWidget {
   readonly property string clockOutlineIcon: String.fromCodePoint(0xf0465)
   readonly property string alertIcon: String.fromCodePoint(0xf0292)
   readonly property string autoplayIcon: String.fromCodePoint(0xf0ab5)
-  readonly property color popupForeground: bar ? bar.foreground : Color.foreground
+  readonly property color popupForeground: bar ? bar.foreground : Commons.Color.foreground
   readonly property string popupFontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string trackLabel: {
     if (!music || !music.hasMedia) return "Music"
@@ -180,7 +181,7 @@ BarWidget {
         Rectangle {
           width: parent.width * (root.music ? root.music.progress : 0)
           height: parent.height
-          color: Color.accent
+          color: Commons.Color.accent
         }
       }
     }
@@ -201,7 +202,7 @@ BarWidget {
       OpticalGlyph {
         anchors.fill: parent
         text: ""
-        color: root.bar ? root.bar.barForeground : Color.foreground
+        color: root.bar ? root.bar.barForeground : Commons.Color.foreground
         fontFamily: root.bar ? root.popupFontFamily : Style.font.family
         fontSize: Style.bar.iconFont
       }
@@ -220,7 +221,7 @@ BarWidget {
         anchors.verticalCenterOffset: -0.5
         text: root.trackLabel
         textFormat: Text.PlainText
-        color: root.bar ? root.bar.barForeground : Color.foreground
+        color: root.bar ? root.bar.barForeground : Commons.Color.foreground
         font.family: root.bar ? root.popupFontFamily : Style.font.family
         font.pixelSize: Style.font.body
         elide: Text.ElideRight
@@ -280,7 +281,7 @@ BarWidget {
       anchors.margins: -popup.padding
       radius: Style.cornerRadius
       clip: true
-      color: Color.popups.background
+      color: Commons.Color.popups.background
       visible: root.readyArtUrl !== ""
 
       Image {
@@ -302,7 +303,7 @@ BarWidget {
 
       Rectangle {
         anchors.fill: parent
-        color: Util.alpha(Color.popups.background, 0.5)
+        color: Util.alpha(Commons.Color.popups.background, 0.5)
       }
     }
 
@@ -319,8 +320,8 @@ BarWidget {
           width: Style.space(88)
           height: width
           radius: Style.spacing.labelGap
-          color: Style.normalFillFor(root.popupForeground, Color.accent)
-          borderSpec: Border.controlSpec("normal", root.popupForeground, Color.accent)
+          color: Style.normalFillFor(root.popupForeground, Commons.Color.accent)
+          borderSpec: Border.controlSpec("normal", root.popupForeground, Commons.Color.accent)
 
           Image {
             id: artwork
@@ -399,7 +400,7 @@ BarWidget {
             width: parent.width * (root.music ? root.music.progress : 0)
             height: parent.height
             radius: parent.radius
-            color: Color.accent
+            color: Commons.Color.accent
           }
 
           MouseArea {
@@ -492,7 +493,7 @@ BarWidget {
           iconText: root.music && root.music.rating === "like"
             ? root.heartIcon : root.heartOutlineIcon
           foreground: root.music && root.music.rating === "like"
-            ? Color.accent : root.popupForeground
+            ? Commons.Color.accent : root.popupForeground
           enabled: !!root.music && root.music.bridgeActive
           opacity: enabled ? 1 : 0.4
           tooltipText: "Like"
@@ -506,7 +507,7 @@ BarWidget {
           iconText: root.music && root.music.rating === "dislike"
             ? root.thumbDownIcon : root.thumbDownOutlineIcon
           foreground: root.music && root.music.rating === "dislike"
-            ? Color.accent : root.popupForeground
+            ? Commons.Color.accent : root.popupForeground
           enabled: !!root.music && root.music.bridgeActive
           opacity: enabled ? 1 : 0.4
           tooltipText: "Suggest less"
@@ -522,7 +523,7 @@ BarWidget {
             : root.music.libraryState === "adding" ? root.clockOutlineIcon
             : root.music.libraryState === "present" ? root.checkIcon : root.alertIcon
           foreground: root.music && root.music.libraryState === "present"
-            ? Color.accent : root.popupForeground
+            ? Commons.Color.accent : root.popupForeground
           enabled: !!root.music && root.music.libraryState === "absent"
           opacity: enabled ? 1 : 0.4
           tooltipText: !root.music || root.music.libraryState === "unknown"
@@ -554,7 +555,7 @@ BarWidget {
           visible: root.showPlaybackModes && !!root.music && root.music.bridgeActive
           iconText: root.shuffleIcon
           foreground: root.music && root.music.shuffleMode === true
-            ? Color.accent : root.popupForeground
+            ? Commons.Color.accent : root.popupForeground
           enabled: !!root.music && root.music.shuffleMode !== null
           opacity: enabled ? 1 : 0.4
           tooltipText: "Shuffle"
@@ -569,7 +570,7 @@ BarWidget {
           iconText: !root.music || root.music.repeatMode === "all" ? root.repeatIcon
             : root.music.repeatMode === "one" ? root.repeatOnceIcon : root.repeatOffIcon
           foreground: root.music && (root.music.repeatMode === "all" || root.music.repeatMode === "one")
-            ? Color.accent : root.popupForeground
+            ? Commons.Color.accent : root.popupForeground
           enabled: !!root.music && root.music.repeatMode !== "unknown"
           opacity: enabled ? 1 : 0.4
           tooltipText: root.music && root.music.repeatMode === "one"
@@ -584,7 +585,7 @@ BarWidget {
           visible: root.showPlaybackModes && !!root.music && root.music.bridgeActive
           iconText: root.autoplayIcon
           foreground: root.music && root.music.autoplay === true
-            ? Color.accent : root.popupForeground
+            ? Commons.Color.accent : root.popupForeground
           enabled: !!root.music && root.music.autoplay !== null
           opacity: enabled ? 1 : 0.4
           tooltipText: "Autoplay"
